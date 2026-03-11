@@ -30,6 +30,8 @@ export class OidcClientService {
     const clientId = this.config.get<string>('ZITADEL_CLIENT_ID');
     const clientSecret =
       this.config.get<string>('ZITADEL_CLIENT_SECRET') || undefined;
+    const allowInsecure =
+      this.config.get<boolean>('OIDC_ALLOW_INSECURE_HTTP') ?? false;
 
     if (!issuerUrl || !clientId) {
       throw new ServiceUnavailableException('OIDC is not configured');
@@ -41,11 +43,16 @@ export class OidcClientService {
       ? oidc.ClientSecretBasic(clientSecret)
       : oidc.None();
 
+    const options = allowInsecure
+      ? { execute: [oidc.allowInsecureRequests] }
+      : undefined;
+
     const config = await oidc.discovery(
       issuer,
       clientId,
       clientSecret || undefined,
       clientAuth,
+      options,
     );
 
     return config;

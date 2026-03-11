@@ -1,6 +1,16 @@
-import { Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Query,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
+import { Session } from './session.decorator';
+import { SessionGuard } from './session.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -22,5 +32,11 @@ export class AuthController {
   @Post('logout')
   async logout(@Req() req: Request, @Res() res: Response): Promise<void> {
     await this.auth.logout(req, res);
+  }
+
+  @Get('me')
+  @UseGuards(SessionGuard)
+  me(@Session() session: unknown) {
+    return session;
   }
 }

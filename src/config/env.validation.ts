@@ -68,6 +68,10 @@ export const envValidationSchema = Joi.object({
   }),
   ZITADEL_POST_LOGOUT_REDIRECT_URI: Joi.string().uri().optional(),
   ZITADEL_SCOPES: Joi.string().default('openid profile email offline_access'),
+  OIDC_ALLOW_INSECURE_HTTP: Joi.boolean()
+    .truthy('true')
+    .falsy('false')
+    .default(false),
 
   // Session cookie settings
   SESSION_COOKIE_NAME: Joi.string().default('auth_session'),
