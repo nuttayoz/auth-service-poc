@@ -78,3 +78,14 @@ model AuditLog {
   @@index([actorUserId])
   @@index([action])
 }
+
+model OidcRequest {
+  id           String   @id @default(uuid())
+  state        String   @unique
+  codeVerifier String
+  nonce        String
+  redirectUri  String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}

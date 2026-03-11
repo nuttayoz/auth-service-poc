@@ -17,14 +17,23 @@ const base64Key32 = Joi.string()
 const base64Key32Optional = base64Key32.allow('').optional();
 
 export const envValidationSchema = Joi.object({
-  NODE_ENV: Joi.string().valid('development', 'test', 'production').default('development'),
+  NODE_ENV: Joi.string()
+    .valid('development', 'test', 'production')
+    .default('development'),
   PORT: Joi.number().integer().min(1).max(65535).default(3000),
 
   DATABASE_URL: Joi.string().uri().required(),
 
   // Feature flags
-  CRYPTO_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   OIDC_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
+  CRYPTO_ENABLED: Joi.boolean()
+    .truthy('true')
+    .falsy('false')
+    .default(false)
+    .when('OIDC_ENABLED', {
+      is: true,
+      then: Joi.valid(true).required(),
+    }),
 
   // Crypto keys (required only when CRYPTO_ENABLED=true)
   SESSION_ENC_KEY: Joi.when('CRYPTO_ENABLED', {
@@ -64,7 +73,15 @@ export const envValidationSchema = Joi.object({
   SESSION_COOKIE_NAME: Joi.string().default('auth_session'),
   SESSION_COOKIE_DOMAIN: Joi.string().allow('').optional(),
   SESSION_COOKIE_PATH: Joi.string().default('/'),
-  SESSION_COOKIE_SECURE: Joi.boolean().truthy('true').falsy('false').default(false),
-  SESSION_COOKIE_SAMESITE: Joi.string().valid('lax', 'strict', 'none').default('lax'),
-  SESSION_COOKIE_MAX_AGE_SEC: Joi.number().integer().min(60).default(60 * 60 * 24 * 7),
+  SESSION_COOKIE_SECURE: Joi.boolean()
+    .truthy('true')
+    .falsy('false')
+    .default(false),
+  SESSION_COOKIE_SAMESITE: Joi.string()
+    .valid('lax', 'strict', 'none')
+    .default('lax'),
+  SESSION_COOKIE_MAX_AGE_SEC: Joi.number()
+    .integer()
+    .min(60)
+    .default(60 * 60 * 24 * 7),
 }).unknown(true);
