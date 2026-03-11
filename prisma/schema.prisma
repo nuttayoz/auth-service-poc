@@ -1,0 +1,80 @@
+// This is your Prisma schema file.
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum RootKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum SigningKeyStatus {
+  ACTIVE
+  ROTATED
+  REVOKED
+}
+
+model Session {
+  id               String        @id @default(uuid())
+  userId           String
+  orgId            String?
+  accessExpiresAt  DateTime
+  refreshExpiresAt DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  tokens           SessionToken?
+
+  @@index([userId])
+  @@index([orgId])
+}
+
+model SessionToken {
+  id                String   @id @default(uuid())
+  sessionId         String   @unique
+  accessTokenEnc    Bytes
+  accessTokenNonce  Bytes
+  accessTokenTag    Bytes
+  refreshTokenEnc   Bytes
+  refreshTokenNonce Bytes
+  refreshTokenTag   Bytes
+  keyId             String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model RootKey {
+  id        String        @id @default(uuid())
+  keyHash   String        @unique
+  keyEnc    Bytes?
+  status    RootKeyStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  revokedAt DateTime?
+}
+
+model SigningKey {
+  id        String           @id @default(uuid())
+  keyId     String           @unique
+  keyEnc    Bytes
+  status    SigningKeyStatus @default(ACTIVE)
+  createdAt DateTime         @default(now())
+  revokedAt DateTime?
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?
+  action      String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([actorUserId])
+  @@index([action])
+}
