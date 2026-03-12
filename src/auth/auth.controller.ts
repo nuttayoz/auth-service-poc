@@ -8,9 +8,9 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { AuthService } from './auth.service';
-import { Session } from './session.decorator';
-import { SessionGuard } from './session.guard';
+import { AuthService } from './auth.service.js';
+import { Session } from './session.decorator.js';
+import { SessionGuard } from './session.guard.js';
 
 @Controller('auth')
 export class AuthController {

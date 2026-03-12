@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
-import { SessionService } from './session.service';
+import { SessionService } from './session.service.js';
 
 export type RequestWithSession = Request & {
   session?: Awaited<ReturnType<SessionService['loadSession']>>;

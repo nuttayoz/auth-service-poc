@@ -1,4 +1,4 @@
-import * as Joi from 'joi';
+import Joi from 'joi';
 
 const base64Key32 = Joi.string()
   .pattern(/^[A-Za-z0-9+/]+={0,2}$/)

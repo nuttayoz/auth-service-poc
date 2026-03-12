@@ -6,9 +6,9 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
-import { CryptoService } from '../crypto/crypto.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { OidcClientService } from './oidc-client.service';
+import { CryptoService } from '../crypto/crypto.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+import { OidcClientService } from './oidc-client.service.js';
 
 const OIDC_REQUEST_TTL_MS = 10 * 60 * 1000;
 
