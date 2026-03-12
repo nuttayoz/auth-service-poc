@@ -1,21 +1,19 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as oidc from 'openid-client';
 
-type OidcModule = typeof import('openid-client');
-type OidcConfig = import('openid-client').Configuration;
+type OidcModule = typeof oidc;
+type OidcConfig = oidc.Configuration;
 
 @Injectable()
 export class OidcClientService {
-  private modulePromise: Promise<OidcModule> | null = null;
   private configPromise: Promise<OidcConfig> | null = null;
+  private readonly moduleRef: OidcModule = oidc;
 
   constructor(private readonly config: ConfigService) {}
 
-  async getModule(): Promise<OidcModule> {
-    if (!this.modulePromise) {
-      this.modulePromise = import('openid-client');
-    }
-    return this.modulePromise;
+  getModule(): OidcModule {
+    return this.moduleRef;
   }
 
   async getConfig(): Promise<OidcConfig> {
@@ -37,7 +35,7 @@ export class OidcClientService {
       throw new ServiceUnavailableException('OIDC is not configured');
     }
 
-    const oidc = await this.getModule();
+    const oidc = this.getModule();
     const issuer = new URL(issuerUrl);
     const clientAuth = clientSecret
       ? oidc.ClientSecretBasic(clientSecret)

@@ -25,7 +25,7 @@ export class AuthService {
     this.assertOidcEnabled();
     this.assertCryptoEnabled();
 
-    const oidc = await this.oidc.getModule();
+    const oidc = this.oidc.getModule();
     const config = await this.oidc.getConfig();
 
     const state = oidc.randomState();
@@ -85,7 +85,7 @@ export class AuthService {
       throw new UnauthorizedException('State expired');
     }
 
-    const oidc = await this.oidc.getModule();
+    const oidc = this.oidc.getModule();
     const config = await this.oidc.getConfig();
     const redirectUri = this.requireConfig('ZITADEL_REDIRECT_URI');
     const currentUrl = new URL(
