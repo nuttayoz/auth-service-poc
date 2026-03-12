@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
+import { AuthService } from './auth.service.js';
 import { SessionService } from './session.service.js';
 
 export type RequestWithSession = Request & {
@@ -17,6 +18,7 @@ export class SessionGuard implements CanActivate {
   constructor(
     private readonly config: ConfigService,
     private readonly sessions: SessionService,
+    private readonly auth: AuthService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -29,9 +31,13 @@ export class SessionGuard implements CanActivate {
       throw new UnauthorizedException('Missing session cookie');
     }
 
-    const session = await this.sessions.loadSession(sessionId);
+    let session = await this.sessions.loadSession(sessionId);
     if (!session) {
       throw new UnauthorizedException('Invalid session');
+    }
+
+    if (session.accessExpired) {
+      session = await this.auth.refreshSession(session.id);
     }
 
     req.session = session;

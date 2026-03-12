@@ -9,8 +9,10 @@ import { Request, Response } from 'express';
 import { CryptoService } from '../crypto/crypto.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OidcClientService } from './oidc-client.service.js';
+import type { SessionContext } from './session.service.js';
 
 const OIDC_REQUEST_TTL_MS = 10 * 60 * 1000;
+const REFRESH_SKEW_MS = 2 * 60 * 1000;
 
 @Injectable()
 export class AuthService {
@@ -170,6 +172,99 @@ export class AuthService {
 
     this.clearSessionCookie(res);
     res.status(204).send();
+  }
+
+  async refreshSession(sessionId: string): Promise<SessionContext> {
+    this.assertOidcEnabled();
+    this.assertCryptoEnabled();
+
+    const session = await this.prisma.session.findUnique({
+      where: { id: sessionId },
+      include: { tokens: true },
+    });
+
+    if (!session || !session.tokens) {
+      throw new UnauthorizedException('Session not found');
+    }
+
+    const now = Date.now();
+    if (session.accessExpiresAt.getTime() - now > REFRESH_SKEW_MS) {
+      return {
+        id: session.id,
+        userId: session.userId,
+        orgId: session.orgId ?? null,
+        accessExpiresAt: session.accessExpiresAt,
+        accessExpired: false,
+      };
+    }
+
+    const refreshToken = this.crypto
+      .decrypt({
+        keyId: session.tokens.keyId,
+        ciphertext: Buffer.from(session.tokens.refreshTokenEnc).toString(
+          'base64',
+        ),
+        nonce: Buffer.from(session.tokens.refreshTokenNonce).toString('base64'),
+        tag: Buffer.from(session.tokens.refreshTokenTag).toString('base64'),
+      })
+      .toString('utf8');
+
+    if (!refreshToken) {
+      throw new UnauthorizedException('Missing refresh token');
+    }
+
+    const oidc = this.oidc.getModule();
+    const config = await this.oidc.getConfig();
+
+    const tokenSet = await oidc.refreshTokenGrant(config, refreshToken);
+
+    const accessToken = tokenSet?.access_token ?? '';
+    if (!accessToken) {
+      throw new UnauthorizedException('Missing access token');
+    }
+
+    const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
+    const newRefreshToken = tokenSet?.refresh_token || refreshToken;
+
+    const encAccess = this.crypto.encrypt(accessToken);
+    const encRefresh = this.crypto.encrypt(newRefreshToken);
+
+    await this.prisma.session.update({
+      where: { id: session.id },
+      data: {
+        accessExpiresAt,
+        tokens: {
+          upsert: {
+            create: {
+              accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
+              accessTokenNonce: Buffer.from(encAccess.nonce, 'base64'),
+              accessTokenTag: Buffer.from(encAccess.tag, 'base64'),
+              refreshTokenEnc: Buffer.from(encRefresh.ciphertext, 'base64'),
+              refreshTokenNonce: Buffer.from(encRefresh.nonce, 'base64'),
+              refreshTokenTag: Buffer.from(encRefresh.tag, 'base64'),
+              keyId: encAccess.keyId,
+            },
+            update: {
+              accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
+              accessTokenNonce: Buffer.from(encAccess.nonce, 'base64'),
+              accessTokenTag: Buffer.from(encAccess.tag, 'base64'),
+              refreshTokenEnc: Buffer.from(encRefresh.ciphertext, 'base64'),
+              refreshTokenNonce: Buffer.from(encRefresh.nonce, 'base64'),
+              refreshTokenTag: Buffer.from(encRefresh.tag, 'base64'),
+              keyId: encAccess.keyId,
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      id: session.id,
+      userId: session.userId,
+      orgId: session.orgId ?? null,
+      accessExpiresAt,
+      accessExpired: accessExpiresAt <= new Date(),
+    };
   }
 
   private extractUserId(claims: Record<string, unknown>): string {
