@@ -31,8 +31,12 @@ export class AuthService {
     private readonly zitadel: ZitadelService,
   ) {}
 
-  async login(res: Response, redirect?: string): Promise<void> {
-    await this.startOidc(res, redirect);
+  async login(
+    res: Response,
+    redirect?: string,
+    options?: { orgId?: string; orgDomain?: string },
+  ): Promise<void> {
+    await this.startOidc(res, redirect, options);
   }
 
   async adminSignup(payload: {
@@ -107,6 +111,7 @@ export class AuthService {
   private async startOidc(
     res: Response,
     redirect: string | undefined,
+    options?: { orgId?: string; orgDomain?: string },
   ): Promise<void> {
     this.assertOidcEnabled();
     this.assertCryptoEnabled();
@@ -130,7 +135,7 @@ export class AuthService {
       },
     });
 
-    const scope = this.buildScope();
+    const scope = this.buildScope(options);
     const redirectUri = this.requireConfig('ZITADEL_REDIRECT_URI');
 
     const url = oidc.buildAuthorizationUrl(config, {
@@ -200,7 +205,24 @@ export class AuthService {
     const zitadelSub = this.extractUserId(claims);
     const orgId = this.extractOrgId(claims);
     const email = this.extractEmail(claims);
-    const roles = this.extractRoles(claims);
+    let roles = this.extractRoles(claims, accessToken);
+    if (roles.length === 0 && accessToken) {
+      try {
+        const userInfo = (await oidc.fetchUserInfo(
+          config,
+          accessToken,
+          zitadelSub,
+        )) as Record<string, unknown>;
+        roles = this.extractRoles(userInfo);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'unknown error';
+        this.logger.warn(`Userinfo request failed: ${message}`);
+      }
+    }
+    this.logger.log(
+      `OIDC extracted roles: ${roles.length > 0 ? roles.join(',') : 'none'}`,
+    );
     const user = await this.resolveUserFromOidc({
       userId: zitadelSub,
       orgId,
@@ -390,16 +412,27 @@ export class AuthService {
     return null;
   }
 
-  private extractRoles(claims: Record<string, unknown>): string[] {
-    const roles = new Set<string>();
-    const projectId =
-      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
+  private extractRoles(
+    claims: Record<string, unknown>,
+    accessToken?: string,
+  ): string[] {
+    const roles = this.collectRolesFromClaims(claims);
 
-    const roleClaims = [
-      projectId ? `urn:zitadel:iam:org:project:${projectId}:roles` : '',
-      'urn:zitadel:iam:org:project:roles',
-      'urn:zitadel:iam:org:projects:roles',
-    ].filter(Boolean);
+    if (roles.size === 0 && accessToken) {
+      const accessClaims = this.decodeJwtPayload(accessToken);
+      if (accessClaims) {
+        this.collectRolesFromClaims(accessClaims, roles);
+      }
+    }
+
+    return Array.from(roles);
+  }
+
+  private collectRolesFromClaims(
+    claims: Record<string, unknown>,
+    roles: Set<string> = new Set(),
+  ): Set<string> {
+    const roleClaims = this.getRoleClaimKeys();
 
     for (const claimKey of roleClaims) {
       const claimValue = claims[claimKey];
@@ -420,7 +453,37 @@ export class AuthService {
       }
     }
 
-    return Array.from(roles);
+    return roles;
+  }
+
+  private getRoleClaimKeys(): string[] {
+    const projectId =
+      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
+
+    return [
+      projectId ? `urn:zitadel:iam:org:project:${projectId}:roles` : '',
+      'urn:zitadel:iam:org:project:roles',
+      'urn:zitadel:iam:org:projects:roles',
+    ].filter(Boolean);
+  }
+
+  private decodeJwtPayload(token: string): Record<string, unknown> | null {
+    const parts = token.split('.');
+    if (parts.length < 2) {
+      return null;
+    }
+
+    const payload = parts[1];
+    try {
+      const normalized = payload
+        .replace(/-/g, '+')
+        .replace(/_/g, '/')
+        .padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=');
+      const json = Buffer.from(normalized, 'base64').toString('utf8');
+      return JSON.parse(json) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
   }
 
   private async resolveUserFromOidc(params: {
@@ -544,16 +607,37 @@ export class AuthService {
     return null;
   }
 
-  private buildScope(): string {
+  private buildScope(options?: { orgId?: string; orgDomain?: string }): string {
     const base = this.config.get<string>('ZITADEL_SCOPES') ?? DEFAULT_SCOPES;
     const projectId =
       this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
-    if (!projectId) {
-      return base;
+
+    const orgId = options?.orgId?.trim();
+    const orgDomain = options?.orgDomain?.trim().toLowerCase();
+
+    if (orgId && orgDomain) {
+      throw new BadRequestException(
+        'Provide either orgId or orgDomain, not both',
+      );
     }
+
+    if (orgId && /\s/.test(orgId)) {
+      throw new BadRequestException('orgId must not contain spaces');
+    }
+    if (orgDomain && /\s/.test(orgDomain)) {
+      throw new BadRequestException('orgDomain must not contain spaces');
+    }
+
     const roleScope = `urn:zitadel:iam:org:project:${projectId}:roles`;
     const scopes = new Set(base.split(' ').filter(Boolean));
-    scopes.add(roleScope);
+    if (projectId) {
+      scopes.add(roleScope);
+    }
+    if (orgId) {
+      scopes.add(`urn:zitadel:iam:org:id:${orgId}`);
+    } else if (orgDomain) {
+      scopes.add(`urn:zitadel:iam:org:domain:primary:${orgDomain}`);
+    }
     return Array.from(scopes).join(' ');
   }
 

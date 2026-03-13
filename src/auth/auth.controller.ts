@@ -21,8 +21,10 @@ export class AuthController {
   async login(
     @Res() res: Response,
     @Query('redirect') redirect?: string,
+    @Query('orgId') orgId?: string,
+    @Query('orgDomain') orgDomain?: string,
   ): Promise<void> {
-    await this.auth.login(res, redirect);
+    await this.auth.login(res, redirect, { orgId, orgDomain });
   }
 
   @Post('signup/admin')
