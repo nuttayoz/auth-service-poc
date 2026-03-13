@@ -5,6 +5,8 @@ export type SessionContext = {
   id: string;
   userId: string;
   orgId: string | null;
+  roles: string[];
+  permissions: string[];
   accessExpiresAt: Date;
   accessExpired: boolean;
 };
@@ -16,9 +18,10 @@ export class SessionService {
   async loadSession(sessionId: string): Promise<SessionContext | null> {
     const session = await this.prisma.session.findUnique({
       where: { id: sessionId },
+      include: { user: true },
     });
 
-    if (!session) {
+    if (!session || !session.user) {
       return null;
     }
 
@@ -28,6 +31,8 @@ export class SessionService {
       id: session.id,
       userId: session.userId,
       orgId: session.orgId ?? null,
+      roles: [session.user.role],
+      permissions: [],
       accessExpiresAt: session.accessExpiresAt,
       accessExpired,
     };

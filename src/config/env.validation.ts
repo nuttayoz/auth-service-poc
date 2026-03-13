@@ -73,6 +73,14 @@ export const envValidationSchema = Joi.object({
     .falsy('false')
     .default(false),
 
+  // ZITADEL Management API (for org/project/user provisioning)
+  ZITADEL_API_BASE_URL: Joi.string().uri().optional(),
+  ZITADEL_API_TOKEN: Joi.string().allow('').optional(),
+  ZITADEL_MASTER_PROJECT_ID: Joi.string().allow('').optional(),
+  ZITADEL_PROJECT_GRANT_ROLE_KEYS: Joi.string().allow('').optional(),
+  ZITADEL_ADMIN_ROLE_KEY: Joi.string().default('admin'),
+  ZITADEL_USER_ROLE_KEY: Joi.string().default('user'),
+
   // Session cookie settings
   SESSION_COOKIE_NAME: Joi.string().default('auth_session'),
   SESSION_COOKIE_DOMAIN: Joi.string().allow('').optional(),
@@ -88,4 +96,7 @@ export const envValidationSchema = Joi.object({
     .integer()
     .min(60)
     .default(60 * 60 * 24 * 7),
+
+  // Gateway proxy
+  INTERNAL_API_BASE_URL: Joi.string().uri().optional(),
 }).unknown(true);

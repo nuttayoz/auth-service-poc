@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Post,
@@ -22,6 +23,22 @@ export class AuthController {
     @Query('redirect') redirect?: string,
   ): Promise<void> {
     await this.auth.login(res, redirect);
+  }
+
+  @Post('signup/admin')
+  async adminSignup(
+    @Body()
+    body: {
+      orgName?: string;
+      orgDomain?: string;
+      email?: string;
+      password?: string;
+      firstName?: string;
+      lastName?: string;
+      userName?: string;
+    },
+  ) {
+    return this.auth.adminSignup(body);
   }
 
   @Get('callback')

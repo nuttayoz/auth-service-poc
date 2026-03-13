@@ -1,29 +1,113 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { UserRole, UserStatus } from '@prisma/client';
+import type { User } from '@prisma/client';
 import { Request, Response } from 'express';
 import { CryptoService } from '../crypto/crypto.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { ZitadelService } from '../zitadel/zitadel.service.js';
 import { OidcClientService } from './oidc-client.service.js';
 import type { SessionContext } from './session.service.js';
 
 const OIDC_REQUEST_TTL_MS = 10 * 60 * 1000;
 const REFRESH_SKEW_MS = 2 * 60 * 1000;
+const DEFAULT_SCOPES = 'openid profile email offline_access';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly oidc: OidcClientService,
+    private readonly zitadel: ZitadelService,
   ) {}
 
   async login(res: Response, redirect?: string): Promise<void> {
+    await this.startOidc(res, redirect);
+  }
+
+  async adminSignup(payload: {
+    orgName?: string;
+    orgDomain?: string;
+    email?: string;
+    password?: string;
+    firstName?: string;
+    lastName?: string;
+    userName?: string;
+  }): Promise<{ orgId: string; userId: string }> {
+    this.assertOidcEnabled();
+
+    const orgName = payload.orgName?.trim();
+    const email = payload.email?.trim().toLowerCase();
+    const password = payload.password ?? '';
+
+    if (!orgName) {
+      throw new BadRequestException('orgName is required');
+    }
+    if (!email) {
+      throw new BadRequestException('email is required');
+    }
+    if (!password) {
+      throw new BadRequestException('password is required');
+    }
+
+    this.logger.log(`Admin signup start: org="${orgName}" email="${email}"`);
+
+    const result = await this.zitadel.setupOrganization({
+      orgName,
+      orgDomain: payload.orgDomain?.trim() || undefined,
+      admin: {
+        email,
+        password,
+        firstName: payload.firstName?.trim() || 'Admin',
+        lastName: payload.lastName?.trim() || 'User',
+        userName: payload.userName?.trim() || email,
+      },
+    });
+
+    await this.prisma.org.upsert({
+      where: { id: result.orgId },
+      create: { id: result.orgId, name: orgName },
+      update: { name: orgName },
+    });
+
+    await this.prisma.user.upsert({
+      where: { id: result.userId },
+      create: {
+        id: result.userId,
+        orgId: result.orgId,
+        email,
+        role: UserRole.ROOT,
+        status: UserStatus.ACTIVE,
+      },
+      update: {
+        orgId: result.orgId,
+        email,
+        role: UserRole.ROOT,
+        status: UserStatus.ACTIVE,
+      },
+    });
+
+    this.logger.log(
+      `Admin signup complete: orgId="${result.orgId}" userId="${result.userId}"`,
+    );
+
+    return result;
+  }
+
+  private async startOidc(
+    res: Response,
+    redirect: string | undefined,
+  ): Promise<void> {
     this.assertOidcEnabled();
     this.assertCryptoEnabled();
 
@@ -46,9 +130,7 @@ export class AuthService {
       },
     });
 
-    const scope =
-      this.config.get<string>('ZITADEL_SCOPES') ??
-      'openid profile email offline_access';
+    const scope = this.buildScope();
     const redirectUri = this.requireConfig('ZITADEL_REDIRECT_URI');
 
     const url = oidc.buildAuthorizationUrl(config, {
@@ -115,8 +197,16 @@ export class AuthService {
     }
 
     const claims = tokenSet?.claims?.() ?? {};
-    const userId = this.extractUserId(claims);
+    const zitadelSub = this.extractUserId(claims);
     const orgId = this.extractOrgId(claims);
+    const email = this.extractEmail(claims);
+    const roles = this.extractRoles(claims);
+    const user = await this.resolveUserFromOidc({
+      userId: zitadelSub,
+      orgId,
+      email,
+      roles,
+    });
 
     const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
 
@@ -125,8 +215,8 @@ export class AuthService {
 
     const session = await this.prisma.session.create({
       data: {
-        userId,
-        orgId,
+        userId: user.id,
+        orgId: user.orgId,
         accessExpiresAt,
         refreshExpiresAt: null,
         tokens: {
@@ -152,8 +242,9 @@ export class AuthService {
 
     res.json({
       sessionId: session.id,
-      userId,
-      orgId,
+      userId: user.id,
+      orgId: user.orgId,
+      roles: [user.role],
     });
   }
 
@@ -180,10 +271,10 @@ export class AuthService {
 
     const session = await this.prisma.session.findUnique({
       where: { id: sessionId },
-      include: { tokens: true },
+      include: { tokens: true, user: true },
     });
 
-    if (!session || !session.tokens) {
+    if (!session || !session.tokens || !session.user) {
       throw new UnauthorizedException('Session not found');
     }
 
@@ -193,6 +284,8 @@ export class AuthService {
         id: session.id,
         userId: session.userId,
         orgId: session.orgId ?? null,
+        roles: [session.user.role],
+        permissions: [],
         accessExpiresAt: session.accessExpiresAt,
         accessExpired: false,
       };
@@ -262,6 +355,8 @@ export class AuthService {
       id: session.id,
       userId: session.userId,
       orgId: session.orgId ?? null,
+      roles: [session.user.role],
+      permissions: [],
       accessExpiresAt,
       accessExpired: accessExpiresAt <= new Date(),
     };
@@ -275,13 +370,121 @@ export class AuthService {
     throw new UnauthorizedException('Missing user id');
   }
 
-  private extractOrgId(claims: Record<string, unknown>): string | null {
+  private extractOrgId(claims: Record<string, unknown>): string {
     const orgId =
       (typeof claims['org_id'] === 'string' && claims['org_id']) ||
       (typeof claims['orgId'] === 'string' && claims['orgId']) ||
       (typeof claims['urn:zitadel:iam:org:id'] === 'string' &&
         claims['urn:zitadel:iam:org:id']);
-    return typeof orgId === 'string' && orgId.length > 0 ? orgId : null;
+    if (typeof orgId === 'string' && orgId.length > 0) {
+      return orgId;
+    }
+    throw new UnauthorizedException('Missing org id');
+  }
+
+  private extractEmail(claims: Record<string, unknown>): string | null {
+    const email = claims['email'];
+    if (typeof email === 'string' && email.length > 0) {
+      return email.toLowerCase();
+    }
+    return null;
+  }
+
+  private extractRoles(claims: Record<string, unknown>): string[] {
+    const roles = new Set<string>();
+    const projectId =
+      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
+
+    const roleClaims = [
+      projectId ? `urn:zitadel:iam:org:project:${projectId}:roles` : '',
+      'urn:zitadel:iam:org:project:roles',
+      'urn:zitadel:iam:org:projects:roles',
+    ].filter(Boolean);
+
+    for (const claimKey of roleClaims) {
+      const claimValue = claims[claimKey];
+      if (Array.isArray(claimValue)) {
+        claimValue.forEach((value) => {
+          if (typeof value === 'string' && value.length > 0) {
+            roles.add(value);
+          }
+        });
+      } else if (typeof claimValue === 'string') {
+        roles.add(claimValue);
+      } else if (claimValue && typeof claimValue === 'object') {
+        Object.keys(claimValue as Record<string, unknown>).forEach((key) => {
+          if (key.length > 0) {
+            roles.add(key);
+          }
+        });
+      }
+    }
+
+    return Array.from(roles);
+  }
+
+  private async resolveUserFromOidc(params: {
+    userId: string;
+    orgId: string;
+    email: string | null;
+    roles: string[];
+  }): Promise<User> {
+    const role = this.mapRolesToUserRole(params.roles);
+
+    await this.prisma.org.upsert({
+      where: { id: params.orgId },
+      create: { id: params.orgId },
+      update: {},
+    });
+
+    const existing = await this.prisma.user.findUnique({
+      where: { id: params.userId },
+    });
+
+    if (existing) {
+      if (existing.status === UserStatus.DISABLED) {
+        throw new UnauthorizedException('User is disabled');
+      }
+      if (existing.orgId !== params.orgId) {
+        throw new UnauthorizedException('User org mismatch');
+      }
+
+      return this.prisma.user.update({
+        where: { id: params.userId },
+        data: {
+          email: params.email ?? existing.email,
+          role,
+          status: UserStatus.ACTIVE,
+        },
+      });
+    }
+
+    return this.prisma.user.create({
+      data: {
+        id: params.userId,
+        orgId: params.orgId,
+        email: params.email,
+        role,
+        status: UserStatus.ACTIVE,
+      },
+    });
+  }
+
+  private mapRolesToUserRole(roles: string[]): UserRole {
+    const adminRole =
+      this.config.get<string>('ZITADEL_ADMIN_ROLE_KEY') ?? 'admin';
+    const userRole = this.config.get<string>('ZITADEL_USER_ROLE_KEY') ?? 'user';
+
+    if (roles.includes(adminRole)) {
+      return UserRole.ROOT;
+    }
+    if (roles.includes(userRole)) {
+      return UserRole.USER;
+    }
+    if (roles.length > 0) {
+      return UserRole.USER;
+    }
+    throw new UnauthorizedException('Missing required role assignment');
   }
 
   private resolveAccessExpiry(tokenSet: any): Date {
@@ -339,6 +542,19 @@ export class AuthService {
       return redirect;
     }
     return null;
+  }
+
+  private buildScope(): string {
+    const base = this.config.get<string>('ZITADEL_SCOPES') ?? DEFAULT_SCOPES;
+    const projectId =
+      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
+    if (!projectId) {
+      return base;
+    }
+    const roleScope = `urn:zitadel:iam:org:project:${projectId}:roles`;
+    const scopes = new Set(base.split(' ').filter(Boolean));
+    scopes.add(roleScope);
+    return Array.from(scopes).join(' ');
   }
 
   private assertOidcEnabled(): void {
