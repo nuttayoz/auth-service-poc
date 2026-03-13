@@ -20,6 +20,40 @@ enum SigningKeyStatus {
   REVOKED
 }
 
+enum UserRole {
+  ROOT
+  USER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+}
+
+model Org {
+  id        String   @id
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users     User[]
+}
+
+model User {
+  id         String     @id
+  orgId      String
+  email      String?    @unique
+  role       UserRole
+  status     UserStatus @default(PENDING)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  sessions   Session[]
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+}
+
 model Session {
   id               String        @id @default(uuid())
   userId           String
@@ -29,6 +63,7 @@ model Session {
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   tokens           SessionToken?
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([orgId])
