@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   Prisma,
   ProvisioningJobStatus,
+  ProvisioningJobType,
   UserRole,
   UserStatus,
 } from '@prisma/client';
@@ -37,6 +38,13 @@ export class UserProvisionProcessor extends WorkerHost {
 
     if (!provisioningJob) {
       this.logger.warn(`Provisioning job not found: ${provisioningJobId}`);
+      return;
+    }
+
+    if (provisioningJob.jobType !== ProvisioningJobType.USER_CREATE) {
+      this.logger.warn(
+        `Skipping provisioning job ${provisioningJobId}: expected USER_CREATE but found ${provisioningJob.jobType}`,
+      );
       return;
     }
 
