@@ -6,7 +6,8 @@ export const USER_PROVISION_JOB = 'user-provision.create';
 export type UserProvisionJobData = {
   provisioningJobId: string;
   orgId: string;
-  requestedByUserId: string;
+  requestedByUserId?: string;
+  requestedByRootKeyId?: string;
   email: string;
   firstName: string;
   lastName: string;

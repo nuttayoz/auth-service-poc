@@ -68,14 +68,19 @@ export class UserProvisionProcessor extends WorkerHost {
       job.data.role === UserRole.ROOT ? UserRole.ROOT : UserRole.USER;
     const roleKey =
       role === UserRole.ROOT ? this.getAdminRoleKey() : this.getUserRoleKey();
+    const auditActionPrefix = job.data.requestedByRootKeyId
+      ? 'root_key.user'
+      : 'admin.user';
 
     if (!roleKey) {
       await this.markFailed(
         provisioningJobId,
-        job.data.requestedByUserId,
+        job.data.requestedByUserId ?? null,
+        job.data.requestedByRootKeyId,
         job.data.orgId,
         job.data.email,
         role,
+        `${auditActionPrefix}.create_failed`,
         'ZITADEL role key is missing',
       );
       return;
@@ -101,10 +106,12 @@ export class UserProvisionProcessor extends WorkerHost {
     } catch (error) {
       await this.markFailed(
         provisioningJobId,
-        job.data.requestedByUserId,
+        job.data.requestedByUserId ?? null,
+        job.data.requestedByRootKeyId,
         job.data.orgId,
         job.data.email,
         role,
+        `${auditActionPrefix}.create_failed`,
         error instanceof Error ? error.message : 'ZITADEL create failed',
       );
       return;
@@ -147,14 +154,17 @@ export class UserProvisionProcessor extends WorkerHost {
 
         await tx.auditLog.create({
           data: {
-            actorUserId: job.data.requestedByUserId,
-            action: 'admin.user.create',
+            actorUserId: job.data.requestedByUserId ?? null,
+            action: `${auditActionPrefix}.create`,
             metadata: {
               orgId: job.data.orgId,
               provisioningJobId,
               userId,
               email: job.data.email,
               role,
+              ...(job.data.requestedByRootKeyId
+                ? { rootKeyId: job.data.requestedByRootKeyId }
+                : {}),
             } as Prisma.InputJsonValue,
           },
         });
@@ -162,11 +172,13 @@ export class UserProvisionProcessor extends WorkerHost {
     } catch (error) {
       await this.markReconciliationRequired(
         provisioningJobId,
-        job.data.requestedByUserId,
+        job.data.requestedByUserId ?? null,
+        job.data.requestedByRootKeyId,
         job.data.orgId,
         job.data.email,
         role,
         userId,
+        `${auditActionPrefix}.create_reconciliation_required`,
         error instanceof Error ? error.message : 'Local sync failed',
       );
     }
@@ -174,10 +186,12 @@ export class UserProvisionProcessor extends WorkerHost {
 
   private async markFailed(
     provisioningJobId: string,
-    actorUserId: string,
+    actorUserId: string | null,
+    rootKeyId: string | undefined,
     orgId: string,
     email: string,
     role: UserRole,
+    action: string,
     errorMessage: string,
   ): Promise<void> {
     await this.prisma.provisioningJob.update({
@@ -189,22 +203,25 @@ export class UserProvisionProcessor extends WorkerHost {
       },
     });
 
-    await this.writeAuditLogSafe(actorUserId, 'admin.user.create_failed', {
+    await this.writeAuditLogSafe(actorUserId, action, {
       orgId,
       provisioningJobId,
       email,
       role,
       error: errorMessage,
+      ...(rootKeyId ? { rootKeyId } : {}),
     });
   }
 
   private async markReconciliationRequired(
     provisioningJobId: string,
-    actorUserId: string,
+    actorUserId: string | null,
+    rootKeyId: string | undefined,
     orgId: string,
     email: string,
     role: UserRole,
     userId: string,
+    action: string,
     errorMessage: string,
   ): Promise<void> {
     await this.prisma.provisioningJob.update({
@@ -217,18 +234,15 @@ export class UserProvisionProcessor extends WorkerHost {
       },
     });
 
-    await this.writeAuditLogSafe(
-      actorUserId,
-      'admin.user.create_reconciliation_required',
-      {
-        orgId,
-        provisioningJobId,
-        userId,
-        email,
-        role,
-        error: errorMessage,
-      },
-    );
+    await this.writeAuditLogSafe(actorUserId, action, {
+      orgId,
+      provisioningJobId,
+      userId,
+      email,
+      role,
+      error: errorMessage,
+      ...(rootKeyId ? { rootKeyId } : {}),
+    });
   }
 
   private getAdminRoleKey(): string | null {
@@ -242,7 +256,7 @@ export class UserProvisionProcessor extends WorkerHost {
   }
 
   private async writeAuditLogSafe(
-    actorUserId: string,
+    actorUserId: string | null,
     action: string,
     metadata: Record<string, unknown>,
   ): Promise<void> {
