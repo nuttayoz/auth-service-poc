@@ -2,6 +2,9 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
+  Param,
   Post,
   Query,
   Req,
@@ -9,13 +12,17 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { AdminSignupService } from './admin-signup.service.js';
 import { AuthService } from './auth.service.js';
 import { Session } from './session.decorator.js';
 import { SessionGuard } from './session.guard.js';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly adminSignup: AdminSignupService,
+  ) {}
 
   @Get('login')
   async login(
@@ -28,7 +35,8 @@ export class AuthController {
   }
 
   @Post('signup/admin')
-  async adminSignup(
+  @HttpCode(HttpStatus.ACCEPTED)
+  async createAdminSignupJob(
     @Body()
     body: {
       orgName?: string;
@@ -40,7 +48,12 @@ export class AuthController {
       userName?: string;
     },
   ) {
-    return this.auth.adminSignup(body);
+    return this.adminSignup.createAdminSignupJob(body);
+  }
+
+  @Get('signup/admin/jobs/:jobId')
+  async getAdminSignupJob(@Param('jobId') jobId: string) {
+    return this.adminSignup.getAdminSignupJob(jobId);
   }
 
   @Get('callback')

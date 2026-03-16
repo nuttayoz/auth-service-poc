@@ -18,24 +18,26 @@ import {
 import { Queue } from 'bullmq';
 import { CryptoService } from '../crypto/crypto.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import type { SessionContext } from './session.service.js';
 import {
-  USER_PROVISION_JOB,
-  USER_PROVISION_QUEUE,
-  type UserProvisionJobData,
-} from './user-provision.queue.js';
+  ADMIN_SIGNUP_JOB,
+  ADMIN_SIGNUP_QUEUE,
+  type AdminSignupJobData,
+} from './admin-signup.queue.js';
 
-export type CreateUserPayload = {
+export type AdminSignupPayload = {
+  orgName?: string;
+  orgDomain?: string;
   email?: string;
   password?: string;
   firstName?: string;
   lastName?: string;
   userName?: string;
-  role?: 'ROOT' | 'USER';
 };
 
-export type ProvisioningJobResponse = {
+export type AdminSignupJobResponse = {
   id: string;
+  orgName: string | null;
+  orgDomain: string | null;
   orgId: string | null;
   email: string;
   userName: string;
@@ -50,48 +52,53 @@ export type ProvisioningJobResponse = {
 };
 
 @Injectable()
-export class AdminService {
-  private readonly logger = new Logger(AdminService.name);
+export class AdminSignupService {
+  private readonly logger = new Logger(AdminSignupService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
-    @InjectQueue(USER_PROVISION_QUEUE)
-    private readonly provisionQueue: Queue<UserProvisionJobData>,
+    @InjectQueue(ADMIN_SIGNUP_QUEUE)
+    private readonly signupQueue: Queue<AdminSignupJobData>,
   ) {}
 
-  async createUser(
-    session: SessionContext,
-    payload: CreateUserPayload,
-  ): Promise<ProvisioningJobResponse> {
-    const orgId = session.orgId;
-    if (!orgId) {
-      throw new BadRequestException('Missing org');
+  async createAdminSignupJob(
+    payload: AdminSignupPayload,
+  ): Promise<AdminSignupJobResponse> {
+    if (!this.crypto.isEnabled()) {
+      throw new ServiceUnavailableException('Crypto is disabled');
     }
 
+    const orgName = payload.orgName?.trim();
+    const orgDomain = payload.orgDomain?.trim().toLowerCase() || undefined;
     const email = payload.email?.trim().toLowerCase();
+    const password = payload.password ?? '';
+
+    if (!orgName) {
+      throw new BadRequestException('orgName is required');
+    }
     if (!email) {
       throw new BadRequestException('email is required');
     }
-
-    const password = payload.password ?? '';
     if (!password) {
       throw new BadRequestException('password is required');
     }
 
-    const rawRole = (payload.role ?? 'USER').toUpperCase();
-    if (rawRole !== UserRole.ROOT && rawRole !== UserRole.USER) {
-      throw new BadRequestException('role must be ROOT or USER');
-    }
-    const role = rawRole === UserRole.ROOT ? UserRole.ROOT : UserRole.USER;
-    const firstName = payload.firstName?.trim() || 'User';
-    const lastName = payload.lastName?.trim() || '';
+    const firstName = payload.firstName?.trim() || 'Admin';
+    const lastName = payload.lastName?.trim() || 'User';
     const userName = payload.userName?.trim() || email;
 
-    const existing = await this.prisma.provisioningJob.findFirst({
+    const existingUser = await this.prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    if (existingUser) {
+      throw new ConflictException(`User already exists for "${email}"`);
+    }
+
+    const existingJob = await this.prisma.provisioningJob.findFirst({
       where: {
-        jobType: ProvisioningJobType.USER_CREATE,
-        orgId,
+        jobType: ProvisioningJobType.ADMIN_SIGNUP,
         email,
         status: {
           in: [ProvisioningJobStatus.QUEUED, ProvisioningJobStatus.PROCESSING],
@@ -100,9 +107,9 @@ export class AdminService {
       orderBy: { createdAt: 'desc' },
     });
 
-    if (existing) {
+    if (existingJob) {
       throw new ConflictException(
-        `A provisioning job is already in progress for "${email}" (jobId: ${existing.id})`,
+        `An admin signup job is already in progress for "${email}" (jobId: ${existingJob.id})`,
       );
     }
 
@@ -110,30 +117,29 @@ export class AdminService {
     const provisioningJob = await this.prisma.provisioningJob.create({
       data: {
         id: jobId,
-        jobType: ProvisioningJobType.USER_CREATE,
-        orgId,
-        requestedByUserId: session.userId,
+        jobType: ProvisioningJobType.ADMIN_SIGNUP,
+        orgName,
+        orgDomain,
         email,
         firstName,
         lastName,
         userName,
-        requestedRole: role,
+        requestedRole: UserRole.ROOT,
         status: ProvisioningJobStatus.QUEUED,
       },
     });
 
     try {
-      await this.provisionQueue.add(
-        USER_PROVISION_JOB,
+      await this.signupQueue.add(
+        ADMIN_SIGNUP_JOB,
         {
           provisioningJobId: jobId,
-          orgId,
-          requestedByUserId: session.userId,
+          orgName,
+          ...(orgDomain ? { orgDomain } : {}),
           email,
           firstName,
           lastName,
           userName,
-          role,
           encryptedPassword: this.crypto.encrypt(password),
         },
         {
@@ -157,59 +163,41 @@ export class AdminService {
       });
 
       this.logger.error(
-        `Failed to enqueue provisioning job: orgId="${orgId}" email="${email}"`,
+        `Failed to enqueue admin signup job: email="${email}" org="${orgName}"`,
         error instanceof Error ? error.stack : undefined,
       );
 
-      throw new ServiceUnavailableException(
-        'Failed to enqueue provisioning job',
-      );
+      throw new ServiceUnavailableException('Failed to enqueue admin signup');
     }
 
-    await this.writeAuditLogSafe(
-      session.userId,
-      'admin.user.create_requested',
-      {
-        orgId,
-        provisioningJobId: jobId,
-        email,
-        role,
-      },
-    );
+    await this.writeAuditLogSafe(null, 'auth.admin_signup.requested', {
+      provisioningJobId: jobId,
+      orgName,
+      orgDomain,
+      email,
+    });
 
-    return this.toProvisioningJobResponse(provisioningJob);
+    return this.toResponse(provisioningJob);
   }
 
-  async getProvisioningJob(
-    session: SessionContext,
-    jobId: string,
-  ): Promise<ProvisioningJobResponse> {
-    const orgId = session.orgId;
-    if (!orgId) {
-      throw new BadRequestException('Missing org');
-    }
-
+  async getAdminSignupJob(jobId: string): Promise<AdminSignupJobResponse> {
     const job = await this.prisma.provisioningJob.findUnique({
       where: { id: jobId },
     });
 
-    if (
-      !job ||
-      job.jobType !== ProvisioningJobType.USER_CREATE ||
-      job.orgId !== orgId
-    ) {
-      throw new NotFoundException('Provisioning job not found');
+    if (!job || job.jobType !== ProvisioningJobType.ADMIN_SIGNUP) {
+      throw new NotFoundException('Admin signup job not found');
     }
 
-    return this.toProvisioningJobResponse(job);
+    return this.toResponse(job);
   }
 
-  private toProvisioningJobResponse(
-    job: ProvisioningJob,
-  ): ProvisioningJobResponse {
+  private toResponse(job: ProvisioningJob): AdminSignupJobResponse {
     return {
       id: job.id,
-      orgId: job.orgId ?? null,
+      orgName: job.orgName ?? null,
+      orgDomain: job.orgDomain ?? null,
+      orgId: job.resultOrgId ?? job.orgId ?? null,
       email: job.email,
       userName: job.userName,
       role: job.requestedRole,
@@ -224,7 +212,7 @@ export class AdminService {
   }
 
   private async writeAuditLogSafe(
-    actorUserId: string,
+    actorUserId: string | null,
     action: string,
     metadata: Record<string, unknown>,
   ): Promise<void> {

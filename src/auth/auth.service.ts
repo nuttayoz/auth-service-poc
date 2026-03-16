@@ -11,7 +11,6 @@ import type { User } from '@prisma/client';
 import { Request, Response } from 'express';
 import { CryptoService } from '../crypto/crypto.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { ZitadelService } from '../zitadel/zitadel.service.js';
 import { OidcClientService } from './oidc-client.service.js';
 import type { SessionContext } from './session.service.js';
 
@@ -41,7 +40,6 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly oidc: OidcClientService,
-    private readonly zitadel: ZitadelService,
   ) {}
 
   async login(
@@ -50,75 +48,6 @@ export class AuthService {
     options?: { orgId?: string; orgDomain?: string },
   ): Promise<void> {
     await this.startOidc(res, redirect, options);
-  }
-
-  async adminSignup(payload: {
-    orgName?: string;
-    orgDomain?: string;
-    email?: string;
-    password?: string;
-    firstName?: string;
-    lastName?: string;
-    userName?: string;
-  }): Promise<{ orgId: string; userId: string }> {
-    this.assertOidcEnabled();
-
-    const orgName = payload.orgName?.trim();
-    const email = payload.email?.trim().toLowerCase();
-    const password = payload.password ?? '';
-
-    if (!orgName) {
-      throw new BadRequestException('orgName is required');
-    }
-    if (!email) {
-      throw new BadRequestException('email is required');
-    }
-    if (!password) {
-      throw new BadRequestException('password is required');
-    }
-
-    this.logger.log(`Admin signup start: org="${orgName}" email="${email}"`);
-
-    const result = await this.zitadel.setupOrganization({
-      orgName,
-      orgDomain: payload.orgDomain?.trim() || undefined,
-      admin: {
-        email,
-        password,
-        firstName: payload.firstName?.trim() || 'Admin',
-        lastName: payload.lastName?.trim() || 'User',
-        userName: payload.userName?.trim() || email,
-      },
-    });
-
-    await this.prisma.org.upsert({
-      where: { id: result.orgId },
-      create: { id: result.orgId, name: orgName },
-      update: { name: orgName },
-    });
-
-    await this.prisma.user.upsert({
-      where: { id: result.userId },
-      create: {
-        id: result.userId,
-        orgId: result.orgId,
-        email,
-        role: UserRole.ROOT,
-        status: UserStatus.ACTIVE,
-      },
-      update: {
-        orgId: result.orgId,
-        email,
-        role: UserRole.ROOT,
-        status: UserStatus.ACTIVE,
-      },
-    });
-
-    this.logger.log(
-      `Admin signup complete: orgId="${result.orgId}" userId="${result.userId}"`,
-    );
-
-    return result;
   }
 
   private async startOidc(
@@ -159,8 +88,6 @@ export class AuthService {
       code_challenge_method: 'S256',
       nonce,
     });
-    console.log('end login process', url);
-
     res.redirect(url.toString());
   }
 
@@ -234,10 +161,6 @@ export class AuthService {
         this.logger.warn(`Userinfo request failed: ${message}`);
       }
     }
-    console.log('callback auth data', claims, zitadelSub, orgId, email, roles);
-    this.logger.log(
-      `OIDC extracted roles: ${roles.length > 0 ? roles.join(',') : 'none'}`,
-    );
     const user = await this.resolveUserFromOidc({
       userId: zitadelSub,
       orgId,

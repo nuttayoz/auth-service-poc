@@ -35,6 +35,11 @@ export type CreateOrganizationUserParams = {
   roleKeys: string[];
 };
 
+export type CreateOrganizationParams = {
+  orgName: string;
+  orgDomain?: string;
+};
+
 @Injectable()
 export class ZitadelService {
   private readonly logger = new Logger(ZitadelService.name);
@@ -48,34 +53,47 @@ export class ZitadelService {
       `ZITADEL org setup start: org="${params.orgName}" email="${params.admin.email}"`,
     );
 
+    const orgId = await this.createOrganizationWithProjectGrant({
+      orgName: params.orgName,
+      orgDomain: params.orgDomain,
+    });
+
+    const adminRoleKey = this.getAdminRoleKey();
+    if (!adminRoleKey) {
+      throw new ServiceUnavailableException(
+        'ZITADEL admin role key is not set',
+      );
+    }
+
+    const userId = await this.createUserInOrganization({
+      orgId,
+      user: params.admin,
+      roleKeys: [adminRoleKey],
+    });
+
+    return { orgId, userId };
+  }
+
+  async createOrganizationWithProjectGrant(
+    params: CreateOrganizationParams,
+  ): Promise<string> {
     const orgId = await this.createOrganization(params.orgName);
     if (params.orgDomain) {
       await this.addOrganizationDomain(orgId, params.orgDomain);
     }
 
-    const userId = await this.createHumanUser(orgId, params.admin);
-
-    this.logger.log(`ZITADEL org created: orgId="${orgId}" userId="${userId}"`);
-
     const projectId =
       this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
     const grantRoleKeys = this.getProjectRoleKeys();
-    const adminRoleKey = this.getAdminRoleKey();
 
     if (projectId) {
       await this.createProjectGrant(projectId, orgId, grantRoleKeys);
-      if (adminRoleKey) {
-        await this.createAuthorization(userId, projectId, orgId, [
-          adminRoleKey,
-        ]);
-      }
-
       this.logger.log(
         `ZITADEL project grant complete: projectId="${projectId}" orgId="${orgId}"`,
       );
     }
 
-    return { orgId, userId };
+    return orgId;
   }
 
   async createUserInOrganization(
@@ -111,7 +129,7 @@ export class ZitadelService {
     return userId;
   }
 
-  private async createOrganization(name: string): Promise<string> {
+  async createOrganization(name: string): Promise<string> {
     const response = await this.requestJson<{
       organizationId?: string;
     }>('/v2/organizations', { name });
@@ -123,14 +141,11 @@ export class ZitadelService {
     return response.organizationId;
   }
 
-  private async addOrganizationDomain(
-    orgId: string,
-    domain: string,
-  ): Promise<void> {
+  async addOrganizationDomain(orgId: string, domain: string): Promise<void> {
     await this.requestJson(`/v2/organizations/${orgId}/domains`, { domain });
   }
 
-  private async createHumanUser(
+  async createHumanUser(
     orgId: string,
     user: SetupOrganizationParams['admin'],
   ): Promise<string> {
@@ -161,7 +176,7 @@ export class ZitadelService {
     return response.id;
   }
 
-  private async createProjectGrant(
+  async createProjectGrant(
     projectId: string,
     orgId: string,
     roleKeys: string[],
@@ -177,7 +192,7 @@ export class ZitadelService {
     );
   }
 
-  private async createAuthorization(
+  async createAuthorization(
     userId: string,
     projectId: string,
     organizationId: string,
