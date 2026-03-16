@@ -146,6 +146,7 @@ export class AuthService {
       code_challenge_method: 'S256',
       nonce,
     });
+    console.log('end login process', url);
 
     res.redirect(url.toString());
   }
@@ -220,6 +221,7 @@ export class AuthService {
         this.logger.warn(`Userinfo request failed: ${message}`);
       }
     }
+    console.log('callback auth data', claims, zitadelSub, orgId, email, roles);
     this.logger.log(
       `OIDC extracted roles: ${roles.length > 0 ? roles.join(',') : 'none'}`,
     );

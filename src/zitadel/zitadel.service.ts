@@ -23,6 +23,18 @@ export type SetupOrganizationResult = {
   userId: string;
 };
 
+export type CreateOrganizationUserParams = {
+  orgId: string;
+  user: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+    userName: string;
+  };
+  roleKeys: string[];
+};
+
 @Injectable()
 export class ZitadelService {
   private readonly logger = new Logger(ZitadelService.name);
@@ -66,6 +78,39 @@ export class ZitadelService {
     return { orgId, userId };
   }
 
+  async createUserInOrganization(
+    params: CreateOrganizationUserParams,
+  ): Promise<string> {
+    const projectId =
+      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
+    if (!projectId) {
+      throw new ServiceUnavailableException(
+        'ZITADEL_MASTER_PROJECT_ID is not configured',
+      );
+    }
+
+    this.logger.log(
+      `ZITADEL user create start: orgId="${params.orgId}" email="${params.user.email}"`,
+    );
+
+    const userId = await this.createHumanUser(params.orgId, params.user);
+
+    if (params.roleKeys.length > 0) {
+      await this.createAuthorization(
+        userId,
+        projectId,
+        params.orgId,
+        params.roleKeys,
+      );
+    }
+
+    this.logger.log(
+      `ZITADEL user create complete: orgId="${params.orgId}" userId="${userId}"`,
+    );
+
+    return userId;
+  }
+
   private async createOrganization(name: string): Promise<string> {
     const response = await this.requestJson<{
       organizationId?: string;
@@ -87,23 +132,23 @@ export class ZitadelService {
 
   private async createHumanUser(
     orgId: string,
-    admin: SetupOrganizationParams['admin'],
+    user: SetupOrganizationParams['admin'],
   ): Promise<string> {
     const response = await this.requestJson<{ id?: string }>('/v2/users/new', {
       organizationId: orgId,
-      username: admin.userName,
+      username: user.userName,
       human: {
         profile: {
-          givenName: admin.firstName,
-          familyName: admin.lastName,
-          displayName: `${admin.firstName} ${admin.lastName}`.trim(),
+          givenName: user.firstName,
+          familyName: user.lastName,
+          displayName: `${user.firstName} ${user.lastName}`.trim(),
         },
         email: {
-          email: admin.email,
+          email: user.email,
           isVerified: false,
         },
         password: {
-          password: admin.password,
+          password: user.password,
           changeRequired: false,
         },
       },
