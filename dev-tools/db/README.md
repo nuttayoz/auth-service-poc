@@ -1,19 +1,25 @@
-# Dev DB (Postgres)
+# Dev Services (Postgres + Redis)
 
-Start the database:
+Start the local services:
 
 ```bash
 cd /Users/Nuttayos.Suv/Desktop/ztd-poc/auth-service/dev-tools/db
 docker compose up -d
 ```
 
-Connection string:
+Postgres connection string:
 
 ```
-postgresql://postgres:postgres@localhost:5433/auth_service?schema=public
+postgresql://postgres:postgres@localhost:5434/auth_service?schema=public
 ```
 
-Stop the database:
+Redis connection string:
+
+```
+redis://localhost:6380/0
+```
+
+Stop the services:
 
 ```bash
 docker compose down
