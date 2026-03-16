@@ -34,6 +34,8 @@ export type CreateUserPayload = {
   role?: 'ROOT' | 'USER';
 };
 
+export type RootCreateUserPayload = CreateUserPayload;
+
 export type ProvisioningJobResponse = {
   id: string;
   orgId: string | null;
@@ -69,29 +71,107 @@ export class AdminService {
       throw new BadRequestException('Missing org');
     }
 
-    const email = payload.email?.trim().toLowerCase();
+    return this.enqueueUserProvisioning({
+      orgId,
+      requestedByUserId: session.userId,
+      payload,
+      auditAction: 'admin.user.create_requested',
+    });
+  }
+
+  async createUserWithRootKey(
+    rootKey: { id: string; orgId: string },
+    payload: RootCreateUserPayload,
+  ): Promise<ProvisioningJobResponse> {
+    if (
+      'orgId' in (payload as Record<string, unknown>) &&
+      typeof (payload as Record<string, unknown>).orgId !== 'undefined'
+    ) {
+      throw new BadRequestException('orgId is derived from the root key');
+    }
+
+    return this.enqueueUserProvisioning({
+      orgId: rootKey.orgId,
+      requestedByRootKeyId: rootKey.id,
+      payload,
+      auditAction: 'root_key.user.create_requested',
+    });
+  }
+
+  async getProvisioningJob(
+    session: SessionContext,
+    jobId: string,
+  ): Promise<ProvisioningJobResponse> {
+    const orgId = session.orgId;
+    if (!orgId) {
+      throw new BadRequestException('Missing org');
+    }
+
+    const job = await this.prisma.provisioningJob.findUnique({
+      where: { id: jobId },
+    });
+
+    if (
+      !job ||
+      job.jobType !== ProvisioningJobType.USER_CREATE ||
+      job.orgId !== orgId
+    ) {
+      throw new NotFoundException('Provisioning job not found');
+    }
+
+    return this.toProvisioningJobResponse(job);
+  }
+
+  async getProvisioningJobForRootKey(
+    rootKey: { orgId: string },
+    jobId: string,
+  ): Promise<ProvisioningJobResponse> {
+    const job = await this.prisma.provisioningJob.findUnique({
+      where: { id: jobId },
+    });
+
+    if (
+      !job ||
+      job.jobType !== ProvisioningJobType.USER_CREATE ||
+      job.orgId !== rootKey.orgId
+    ) {
+      throw new NotFoundException('Provisioning job not found');
+    }
+
+    return this.toProvisioningJobResponse(job);
+  }
+
+  private async enqueueUserProvisioning(params: {
+    orgId: string;
+    requestedByUserId?: string;
+    requestedByRootKeyId?: string;
+    payload: CreateUserPayload;
+    auditAction: string;
+  }): Promise<ProvisioningJobResponse> {
+    const email = params.payload.email?.trim().toLowerCase();
     if (!email) {
       throw new BadRequestException('email is required');
     }
 
-    const password = payload.password ?? '';
+    const password = params.payload.password ?? '';
     if (!password) {
       throw new BadRequestException('password is required');
     }
 
-    const rawRole = (payload.role ?? 'USER').toUpperCase();
+    const rawRole = (params.payload.role ?? 'USER').toUpperCase();
     if (rawRole !== UserRole.ROOT && rawRole !== UserRole.USER) {
       throw new BadRequestException('role must be ROOT or USER');
     }
+
     const role = rawRole === UserRole.ROOT ? UserRole.ROOT : UserRole.USER;
-    const firstName = payload.firstName?.trim() || 'User';
-    const lastName = payload.lastName?.trim() || '';
-    const userName = payload.userName?.trim() || email;
+    const firstName = params.payload.firstName?.trim() || 'User';
+    const lastName = params.payload.lastName?.trim() || '';
+    const userName = params.payload.userName?.trim() || email;
 
     const existing = await this.prisma.provisioningJob.findFirst({
       where: {
         jobType: ProvisioningJobType.USER_CREATE,
-        orgId,
+        orgId: params.orgId,
         email,
         status: {
           in: [ProvisioningJobStatus.QUEUED, ProvisioningJobStatus.PROCESSING],
@@ -111,8 +191,13 @@ export class AdminService {
       data: {
         id: jobId,
         jobType: ProvisioningJobType.USER_CREATE,
-        orgId,
-        requestedByUserId: session.userId,
+        orgId: params.orgId,
+        ...(params.requestedByUserId
+          ? { requestedByUserId: params.requestedByUserId }
+          : {}),
+        ...(params.requestedByRootKeyId
+          ? { requestedByRootKeyId: params.requestedByRootKeyId }
+          : {}),
         email,
         firstName,
         lastName,
@@ -127,8 +212,13 @@ export class AdminService {
         USER_PROVISION_JOB,
         {
           provisioningJobId: jobId,
-          orgId,
-          requestedByUserId: session.userId,
+          orgId: params.orgId,
+          ...(params.requestedByUserId
+            ? { requestedByUserId: params.requestedByUserId }
+            : {}),
+          ...(params.requestedByRootKeyId
+            ? { requestedByRootKeyId: params.requestedByRootKeyId }
+            : {}),
           email,
           firstName,
           lastName,
@@ -157,7 +247,7 @@ export class AdminService {
       });
 
       this.logger.error(
-        `Failed to enqueue provisioning job: orgId="${orgId}" email="${email}"`,
+        `Failed to enqueue provisioning job: orgId="${params.orgId}" email="${email}"`,
         error instanceof Error ? error.stack : undefined,
       );
 
@@ -167,41 +257,20 @@ export class AdminService {
     }
 
     await this.writeAuditLogSafe(
-      session.userId,
-      'admin.user.create_requested',
+      params.requestedByUserId ?? null,
+      params.auditAction,
       {
-        orgId,
+        orgId: params.orgId,
         provisioningJobId: jobId,
         email,
         role,
+        ...(params.requestedByRootKeyId
+          ? { rootKeyId: params.requestedByRootKeyId }
+          : {}),
       },
     );
 
     return this.toProvisioningJobResponse(provisioningJob);
-  }
-
-  async getProvisioningJob(
-    session: SessionContext,
-    jobId: string,
-  ): Promise<ProvisioningJobResponse> {
-    const orgId = session.orgId;
-    if (!orgId) {
-      throw new BadRequestException('Missing org');
-    }
-
-    const job = await this.prisma.provisioningJob.findUnique({
-      where: { id: jobId },
-    });
-
-    if (
-      !job ||
-      job.jobType !== ProvisioningJobType.USER_CREATE ||
-      job.orgId !== orgId
-    ) {
-      throw new NotFoundException('Provisioning job not found');
-    }
-
-    return this.toProvisioningJobResponse(job);
   }
 
   private toProvisioningJobResponse(
@@ -224,7 +293,7 @@ export class AdminService {
   }
 
   private async writeAuditLogSafe(
-    actorUserId: string,
+    actorUserId: string | null,
     action: string,
     metadata: Record<string, unknown>,
   ): Promise<void> {
