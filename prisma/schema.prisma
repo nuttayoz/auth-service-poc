@@ -33,6 +33,7 @@ enum UserStatus {
 
 enum ProvisioningJobType {
   USER_CREATE
+  ADMIN_SIGNUP
 }
 
 enum ProvisioningJobStatus {
@@ -129,14 +130,17 @@ model AuditLog {
 model ProvisioningJob {
   id                String                @id
   jobType           ProvisioningJobType   @default(USER_CREATE)
-  orgId             String
-  requestedByUserId String
+  orgId             String?
+  requestedByUserId String?
+  orgName           String?
+  orgDomain         String?
   email             String
   firstName         String?
   lastName          String?
   userName          String
   requestedRole     UserRole
   status            ProvisioningJobStatus @default(QUEUED)
+  resultOrgId       String?
   resultUserId      String?
   errorMessage      String?
   startedAt         DateTime?
@@ -144,9 +148,11 @@ model ProvisioningJob {
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
+  @@index([jobType, status])
   @@index([orgId, status])
   @@index([requestedByUserId])
   @@index([email])
+  @@index([resultOrgId])
 }
 
 model OidcRequest {
