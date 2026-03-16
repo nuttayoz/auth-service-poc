@@ -49,6 +49,7 @@ model Org {
   name      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  rootKeys  RootKey[]
   users     User[]
 }
 
@@ -60,6 +61,7 @@ model User {
   status    UserStatus @default(PENDING)
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
+  rootKeysCreated RootKey[] @relation("RootKeysCreated")
   sessions  Session[]
 
   org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -99,12 +101,21 @@ model SessionToken {
 }
 
 model RootKey {
-  id        String        @id @default(uuid())
-  keyHash   String        @unique
-  keyEnc    Bytes?
-  status    RootKeyStatus @default(ACTIVE)
-  createdAt DateTime      @default(now())
-  revokedAt DateTime?
+  id              String        @id @default(uuid())
+  orgId           String
+  createdByUserId String?
+  keyHash         String        @unique
+  keyEnc          Bytes?
+  status          RootKeyStatus @default(ACTIVE)
+  lastUsedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  revokedAt       DateTime?
+
+  org           Org   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  createdByUser User? @relation("RootKeysCreated", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, status])
+  @@index([createdByUserId])
 }
 
 model SigningKey {
@@ -132,6 +143,7 @@ model ProvisioningJob {
   jobType           ProvisioningJobType   @default(USER_CREATE)
   orgId             String?
   requestedByUserId String?
+  requestedByRootKeyId String?
   orgName           String?
   orgDomain         String?
   email             String
@@ -151,6 +163,7 @@ model ProvisioningJob {
   @@index([jobType, status])
   @@index([orgId, status])
   @@index([requestedByUserId])
+  @@index([requestedByRootKeyId])
   @@index([email])
   @@index([resultOrgId])
 }
