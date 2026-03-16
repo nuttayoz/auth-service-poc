@@ -60,6 +60,7 @@ export class AuthService {
 
     const oidc = this.oidc.getModule();
     const config = await this.oidc.getConfig();
+    const scope = this.buildScope(options);
 
     const state = oidc.randomState();
     const codeVerifier = oidc.randomPKCECodeVerifier();
@@ -77,7 +78,6 @@ export class AuthService {
       },
     });
 
-    const scope = this.buildScope(options);
     const redirectUri = this.requireConfig('ZITADEL_REDIRECT_URI');
 
     const url = oidc.buildAuthorizationUrl(config, {
@@ -654,6 +654,9 @@ export class AuthService {
       throw new BadRequestException(
         'Provide either orgId or orgDomain, not both',
       );
+    }
+    if (!orgId && !orgDomain) {
+      throw new BadRequestException('Provide orgId or orgDomain');
     }
 
     if (orgId && /\s/.test(orgId)) {
