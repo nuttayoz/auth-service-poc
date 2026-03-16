@@ -31,6 +31,18 @@ enum UserStatus {
   DISABLED
 }
 
+enum ProvisioningJobType {
+  USER_CREATE
+}
+
+enum ProvisioningJobStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  RECONCILIATION_REQUIRED
+}
+
 model Org {
   id        String   @id
   name      String?
@@ -40,14 +52,14 @@ model Org {
 }
 
 model User {
-  id         String     @id
-  orgId      String
-  email      String?    @unique
-  role       UserRole
-  status     UserStatus @default(PENDING)
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
-  sessions   Session[]
+  id        String     @id
+  orgId     String
+  email     String?    @unique
+  role      UserRole
+  status    UserStatus @default(PENDING)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  sessions  Session[]
 
   org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
@@ -112,6 +124,29 @@ model AuditLog {
 
   @@index([actorUserId])
   @@index([action])
+}
+
+model ProvisioningJob {
+  id                String                @id
+  jobType           ProvisioningJobType   @default(USER_CREATE)
+  orgId             String
+  requestedByUserId String
+  email             String
+  firstName         String?
+  lastName          String?
+  userName          String
+  requestedRole     UserRole
+  status            ProvisioningJobStatus @default(QUEUED)
+  resultUserId      String?
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([orgId, status])
+  @@index([requestedByUserId])
+  @@index([email])
 }
 
 model OidcRequest {
