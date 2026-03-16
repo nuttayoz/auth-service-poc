@@ -6,11 +6,14 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
+import { AuthService } from './auth.service.js';
 import { RequestWithSession } from './session.guard.js';
 
 @Injectable()
 export class RootGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
+  constructor(private readonly auth: AuthService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<RequestWithSession>();
     const session = req.session;
 
@@ -18,7 +21,10 @@ export class RootGuard implements CanActivate {
       throw new UnauthorizedException('Missing session');
     }
 
-    if (!session.roles?.includes(UserRole.ROOT)) {
+    const currentSession = await this.auth.revalidateSession(session.id);
+    req.session = currentSession;
+
+    if (!currentSession.roles?.includes(UserRole.ROOT)) {
       throw new ForbiddenException('Root access required');
     }
 

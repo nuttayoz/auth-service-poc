@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { UserRole, UserStatus } from '@prisma/client';
+import { Prisma, UserRole, UserStatus } from '@prisma/client';
 import type { User } from '@prisma/client';
 import { Request, Response } from 'express';
 import { CryptoService } from '../crypto/crypto.service.js';
@@ -18,6 +18,19 @@ import type { SessionContext } from './session.service.js';
 const OIDC_REQUEST_TTL_MS = 10 * 60 * 1000;
 const REFRESH_SKEW_MS = 2 * 60 * 1000;
 const DEFAULT_SCOPES = 'openid profile email offline_access';
+
+type SessionWithTokens = Prisma.SessionGetPayload<{
+  include: { tokens: true; user: true };
+}> & {
+  tokens: NonNullable<
+    Prisma.SessionGetPayload<{
+      include: { tokens: true; user: true };
+    }>['tokens']
+  >;
+  user: NonNullable<
+    Prisma.SessionGetPayload<{ include: { tokens: true; user: true } }>['user']
+  >;
+};
 
 @Injectable()
 export class AuthService {
@@ -293,97 +306,42 @@ export class AuthService {
     this.assertOidcEnabled();
     this.assertCryptoEnabled();
 
-    const session = await this.prisma.session.findUnique({
-      where: { id: sessionId },
-      include: { tokens: true, user: true },
-    });
+    const session = await this.loadSessionWithTokens(sessionId);
 
-    if (!session || !session.tokens || !session.user) {
-      throw new UnauthorizedException('Session not found');
-    }
+    const { accessExpiresAt } = await this.getCurrentAccessToken(session);
 
-    const now = Date.now();
-    if (session.accessExpiresAt.getTime() - now > REFRESH_SKEW_MS) {
-      return {
-        id: session.id,
-        userId: session.userId,
-        orgId: session.orgId ?? null,
-        roles: [session.user.role],
-        permissions: [],
-        accessExpiresAt: session.accessExpiresAt,
-        accessExpired: false,
-      };
-    }
-
-    const refreshToken = this.crypto
-      .decrypt({
-        keyId: session.tokens.keyId,
-        ciphertext: Buffer.from(session.tokens.refreshTokenEnc).toString(
-          'base64',
-        ),
-        nonce: Buffer.from(session.tokens.refreshTokenNonce).toString('base64'),
-        tag: Buffer.from(session.tokens.refreshTokenTag).toString('base64'),
-      })
-      .toString('utf8');
-
-    if (!refreshToken) {
-      throw new UnauthorizedException('Missing refresh token');
-    }
-
-    const oidc = this.oidc.getModule();
-    const config = await this.oidc.getConfig();
-
-    const tokenSet = await oidc.refreshTokenGrant(config, refreshToken);
-
-    const accessToken = tokenSet?.access_token ?? '';
-    if (!accessToken) {
-      throw new UnauthorizedException('Missing access token');
-    }
-
-    const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
-    const newRefreshToken = tokenSet?.refresh_token || refreshToken;
-
-    const encAccess = this.crypto.encrypt(accessToken);
-    const encRefresh = this.crypto.encrypt(newRefreshToken);
-
-    await this.prisma.session.update({
-      where: { id: session.id },
-      data: {
-        accessExpiresAt,
-        tokens: {
-          upsert: {
-            create: {
-              accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
-              accessTokenNonce: Buffer.from(encAccess.nonce, 'base64'),
-              accessTokenTag: Buffer.from(encAccess.tag, 'base64'),
-              refreshTokenEnc: Buffer.from(encRefresh.ciphertext, 'base64'),
-              refreshTokenNonce: Buffer.from(encRefresh.nonce, 'base64'),
-              refreshTokenTag: Buffer.from(encRefresh.tag, 'base64'),
-              keyId: encAccess.keyId,
-            },
-            update: {
-              accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
-              accessTokenNonce: Buffer.from(encAccess.nonce, 'base64'),
-              accessTokenTag: Buffer.from(encAccess.tag, 'base64'),
-              refreshTokenEnc: Buffer.from(encRefresh.ciphertext, 'base64'),
-              refreshTokenNonce: Buffer.from(encRefresh.nonce, 'base64'),
-              refreshTokenTag: Buffer.from(encRefresh.tag, 'base64'),
-              keyId: encAccess.keyId,
-            },
-          },
-        },
-      },
-    });
-
-    return {
-      id: session.id,
-      userId: session.userId,
-      orgId: session.orgId ?? null,
-      roles: [session.user.role],
-      permissions: [],
+    return this.buildSessionContext(
+      session,
+      session.user.role,
       accessExpiresAt,
-      accessExpired: accessExpiresAt <= new Date(),
-    };
+    );
+  }
+
+  async revalidateSession(sessionId: string): Promise<SessionContext> {
+    this.assertOidcEnabled();
+    this.assertCryptoEnabled();
+
+    const session = await this.loadSessionWithTokens(sessionId);
+    const { accessToken, accessExpiresAt } = await this.getCurrentAccessToken(
+      session,
+      { forceRefresh: true },
+    );
+    const roles = await this.resolveRolesForSubject(
+      session.userId,
+      accessToken,
+    );
+    const role = this.mapRolesToUserRole(roles);
+
+    if (session.user.status === UserStatus.DISABLED) {
+      throw new UnauthorizedException('User is disabled');
+    }
+
+    await this.prisma.user.update({
+      where: { id: session.userId },
+      data: { role, status: UserStatus.ACTIVE },
+    });
+
+    return this.buildSessionContext(session, role, accessExpiresAt);
   }
 
   private extractUserId(claims: Record<string, unknown>): string {
@@ -428,6 +386,34 @@ export class AuthService {
     }
 
     return Array.from(roles);
+  }
+
+  private async resolveRolesForSubject(
+    userId: string,
+    accessToken: string,
+    claims?: Record<string, unknown>,
+  ): Promise<string[]> {
+    const directClaims = claims ?? this.decodeJwtPayload(accessToken) ?? {};
+    const directRoles = this.extractRoles(directClaims, accessToken);
+    if (directRoles.length > 0) {
+      return directRoles;
+    }
+
+    const oidc = this.oidc.getModule();
+    const config = await this.oidc.getConfig();
+
+    try {
+      const userInfo = (await oidc.fetchUserInfo(
+        config,
+        accessToken,
+        userId,
+      )) as Record<string, unknown>;
+      return this.extractRoles(userInfo);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(`Userinfo request failed: ${message}`);
+      return [];
+    }
   }
 
   private collectRolesFromClaims(
@@ -486,6 +472,114 @@ export class AuthService {
     } catch {
       return null;
     }
+  }
+
+  private async loadSessionWithTokens(
+    sessionId: string,
+  ): Promise<SessionWithTokens> {
+    const session = await this.prisma.session.findUnique({
+      where: { id: sessionId },
+      include: { tokens: true, user: true },
+    });
+
+    if (!session || !session.tokens || !session.user) {
+      throw new UnauthorizedException('Session not found');
+    }
+
+    return session as SessionWithTokens;
+  }
+
+  private async getCurrentAccessToken(
+    session: SessionWithTokens,
+    options: { forceRefresh?: boolean } = {},
+  ): Promise<{ accessToken: string; accessExpiresAt: Date }> {
+    const now = Date.now();
+    const shouldRefresh =
+      options.forceRefresh === true ||
+      session.accessExpiresAt.getTime() - now <= REFRESH_SKEW_MS;
+
+    if (!shouldRefresh) {
+      return {
+        accessToken: this.decryptSessionAccessToken(session),
+        accessExpiresAt: session.accessExpiresAt,
+      };
+    }
+
+    const refreshToken = this.decryptSessionRefreshToken(session);
+    if (!refreshToken) {
+      throw new UnauthorizedException('Missing refresh token');
+    }
+
+    const oidc = this.oidc.getModule();
+    const config = await this.oidc.getConfig();
+    const tokenSet = await oidc.refreshTokenGrant(config, refreshToken);
+
+    const accessToken = tokenSet?.access_token ?? '';
+    if (!accessToken) {
+      throw new UnauthorizedException('Missing access token');
+    }
+
+    const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
+    const newRefreshToken = tokenSet?.refresh_token || refreshToken;
+    const encAccess = this.crypto.encrypt(accessToken);
+    const encRefresh = this.crypto.encrypt(newRefreshToken);
+
+    await this.prisma.session.update({
+      where: { id: session.id },
+      data: {
+        accessExpiresAt,
+        tokens: {
+          upsert: {
+            create: {
+              accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
+              accessTokenNonce: Buffer.from(encAccess.nonce, 'base64'),
+              accessTokenTag: Buffer.from(encAccess.tag, 'base64'),
+              refreshTokenEnc: Buffer.from(encRefresh.ciphertext, 'base64'),
+              refreshTokenNonce: Buffer.from(encRefresh.nonce, 'base64'),
+              refreshTokenTag: Buffer.from(encRefresh.tag, 'base64'),
+              keyId: encAccess.keyId,
+            },
+            update: {
+              accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
+              accessTokenNonce: Buffer.from(encAccess.nonce, 'base64'),
+              accessTokenTag: Buffer.from(encAccess.tag, 'base64'),
+              refreshTokenEnc: Buffer.from(encRefresh.ciphertext, 'base64'),
+              refreshTokenNonce: Buffer.from(encRefresh.nonce, 'base64'),
+              refreshTokenTag: Buffer.from(encRefresh.tag, 'base64'),
+              keyId: encAccess.keyId,
+            },
+          },
+        },
+      },
+    });
+
+    return { accessToken, accessExpiresAt };
+  }
+
+  private decryptSessionAccessToken(session: SessionWithTokens): string {
+    return this.crypto
+      .decrypt({
+        keyId: session.tokens.keyId,
+        ciphertext: Buffer.from(session.tokens.accessTokenEnc).toString(
+          'base64',
+        ),
+        nonce: Buffer.from(session.tokens.accessTokenNonce).toString('base64'),
+        tag: Buffer.from(session.tokens.accessTokenTag).toString('base64'),
+      })
+      .toString('utf8');
+  }
+
+  private decryptSessionRefreshToken(session: SessionWithTokens): string {
+    return this.crypto
+      .decrypt({
+        keyId: session.tokens.keyId,
+        ciphertext: Buffer.from(session.tokens.refreshTokenEnc).toString(
+          'base64',
+        ),
+        nonce: Buffer.from(session.tokens.refreshTokenNonce).toString('base64'),
+        tag: Buffer.from(session.tokens.refreshTokenTag).toString('base64'),
+      })
+      .toString('utf8');
   }
 
   private async resolveUserFromOidc(params: {
@@ -565,6 +659,22 @@ export class AuthService {
     }
 
     return new Date(Date.now() + 3600 * 1000);
+  }
+
+  private buildSessionContext(
+    session: Pick<SessionWithTokens, 'id' | 'userId' | 'orgId'>,
+    role: UserRole,
+    accessExpiresAt: Date,
+  ): SessionContext {
+    return {
+      id: session.id,
+      userId: session.userId,
+      orgId: session.orgId ?? null,
+      roles: [role],
+      permissions: [],
+      accessExpiresAt,
+      accessExpired: accessExpiresAt <= new Date(),
+    };
   }
 
   private setSessionCookie(res: Response, sessionId: string): void {
