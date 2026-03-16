@@ -97,6 +97,9 @@ export const envValidationSchema = Joi.object({
     .min(60)
     .default(60 * 60 * 24 * 7),
 
+  // Queue / Redis
+  REDIS_URL: Joi.string().uri().required(),
+
   // Gateway proxy
   INTERNAL_API_BASE_URL: Joi.string().uri().optional(),
 }).unknown(true);
