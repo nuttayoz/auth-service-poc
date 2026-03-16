@@ -11,6 +11,10 @@ import { AuthService } from './auth.service.js';
 import { GatewayController } from './gateway.controller.js';
 import { OidcClientService } from './oidc-client.service.js';
 import { RootGuard } from './root.guard.js';
+import { RootKeyController } from './root-key.controller.js';
+import { RootKeyGuard } from './root-key.guard.js';
+import { RootKeyService } from './root-key.service.js';
+import { RootProvisionController } from './root-provision.controller.js';
 import { SessionGuard } from './session.guard.js';
 import { SessionService } from './session.service.js';
 import { UserProvisionProcessor } from './user-provision.processor.js';
@@ -27,7 +31,13 @@ import { USER_PROVISION_QUEUE } from './user-provision.queue.js';
       },
     ),
   ],
-  controllers: [AuthController, AdminController, GatewayController],
+  controllers: [
+    AuthController,
+    AdminController,
+    GatewayController,
+    RootKeyController,
+    RootProvisionController,
+  ],
   providers: [
     AdminService,
     AdminSignupProcessor,
@@ -35,6 +45,8 @@ import { USER_PROVISION_QUEUE } from './user-provision.queue.js';
     AuthService,
     OidcClientService,
     RootGuard,
+    RootKeyGuard,
+    RootKeyService,
     SessionService,
     SessionGuard,
     UserProvisionProcessor,
