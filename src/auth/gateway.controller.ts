@@ -78,7 +78,7 @@ export class GatewayController {
       );
     }
 
-    const target = this.buildTargetUrl(baseUrl, req.url);
+    const target = this.buildTargetUrl(baseUrl, req.url.slice(8));
     const { headers, body } = this.buildRequestOptions(req, session);
 
     let upstream: Awaited<ReturnType<typeof fetch>>;
