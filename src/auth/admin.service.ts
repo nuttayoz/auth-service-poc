@@ -17,6 +17,7 @@ import {
 } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { CryptoService } from '../crypto/crypto.service.js';
+import { LoggingContextService } from '../logging/logging-context.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { SessionContext } from './session.service.js';
 import {
@@ -58,6 +59,7 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly loggingContext: LoggingContextService,
     @InjectQueue(USER_PROVISION_QUEUE)
     private readonly provisionQueue: Queue<UserProvisionJobData>,
   ) {}
@@ -211,6 +213,9 @@ export class AdminService {
       await this.provisionQueue.add(
         USER_PROVISION_JOB,
         {
+          ...(this.loggingContext.get('requestId')
+            ? { requestId: this.loggingContext.get('requestId') }
+            : {}),
           provisioningJobId: jobId,
           orgId: params.orgId,
           ...(params.requestedByUserId

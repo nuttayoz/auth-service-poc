@@ -3,6 +3,7 @@ import {
   BadGatewayException,
   Controller,
   InternalServerErrorException,
+  Logger,
   Req,
   Res,
   UseGuards,
@@ -59,6 +60,8 @@ const SIGNED_HEADER_KEYS = [
 
 @Controller('gateway')
 export class GatewayController {
+  private readonly logger = new Logger(GatewayController.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly crypto: CryptoService,
@@ -90,7 +93,15 @@ export class GatewayController {
         redirect: 'manual',
       });
     } catch (error) {
-      console.log(error);
+      this.logger.error(
+        {
+          event: 'gateway.upstream_failed',
+          method: req.method,
+          target,
+          message: error instanceof Error ? error.message : 'unknown error',
+        },
+        error instanceof Error ? error.stack : undefined,
+      );
       throw new BadGatewayException('Upstream request failed');
     }
 

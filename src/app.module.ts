@@ -8,6 +8,7 @@ import { envValidationSchema } from './config/env.validation.js';
 import { AuthModule } from './auth/auth.module.js';
 import { CryptoModule } from './crypto/crypto.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
+import { LoggingModule } from './logging/logging.module.js';
 import { createBullConnection } from './queue/create-bull-connection.js';
 
 @Module({
@@ -29,6 +30,7 @@ import { createBullConnection } from './queue/create-bull-connection.js';
     }),
     AuthModule,
     CryptoModule,
+    LoggingModule,
     PrismaModule,
   ],
   controllers: [AppController],

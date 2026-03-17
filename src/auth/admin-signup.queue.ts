@@ -4,6 +4,7 @@ export const ADMIN_SIGNUP_QUEUE = 'admin-signup';
 export const ADMIN_SIGNUP_JOB = 'admin-signup.create';
 
 export type AdminSignupJobData = {
+  requestId?: string;
   provisioningJobId: string;
   orgName: string;
   orgDomain?: string;

@@ -17,6 +17,7 @@ import {
 } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { CryptoService } from '../crypto/crypto.service.js';
+import { LoggingContextService } from '../logging/logging-context.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
   ADMIN_SIGNUP_JOB,
@@ -58,6 +59,7 @@ export class AdminSignupService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly loggingContext: LoggingContextService,
     @InjectQueue(ADMIN_SIGNUP_QUEUE)
     private readonly signupQueue: Queue<AdminSignupJobData>,
   ) {}
@@ -133,6 +135,9 @@ export class AdminSignupService {
       await this.signupQueue.add(
         ADMIN_SIGNUP_JOB,
         {
+          ...(this.loggingContext.get('requestId')
+            ? { requestId: this.loggingContext.get('requestId') }
+            : {}),
           provisioningJobId: jobId,
           orgName,
           ...(orgDomain ? { orgDomain } : {}),

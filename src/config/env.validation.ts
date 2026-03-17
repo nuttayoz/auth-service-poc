@@ -21,6 +21,7 @@ export const envValidationSchema = Joi.object({
     .valid('development', 'test', 'production')
     .default('development'),
   PORT: Joi.number().integer().min(1).max(65535).default(3000),
+  LOG_FORMAT: Joi.string().valid('json', 'pretty').optional(),
 
   DATABASE_URL: Joi.string().uri().required(),
 

@@ -10,6 +10,7 @@ import {
 } from '@prisma/client';
 import { Job } from 'bullmq';
 import { CryptoService } from '../crypto/crypto.service.js';
+import { LoggingContextService } from '../logging/logging-context.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
   type SetupOrganizationParams,
@@ -26,6 +27,7 @@ export class AdminSignupProcessor extends WorkerHost {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly loggingContext: LoggingContextService,
     private readonly crypto: CryptoService,
     private readonly config: ConfigService,
     private readonly zitadel: ZitadelService,
@@ -34,6 +36,21 @@ export class AdminSignupProcessor extends WorkerHost {
   }
 
   async process(job: Job<AdminSignupJobData>): Promise<void> {
+    return this.loggingContext.run(
+      {
+        requestId:
+          job.data.requestId ?? `job:${job.id ?? job.data.provisioningJobId}`,
+        jobId: job.id ?? undefined,
+        jobName: job.name,
+        provisioningJobId: job.data.provisioningJobId,
+      },
+      () => this.processWithinContext(job),
+    );
+  }
+
+  private async processWithinContext(
+    job: Job<AdminSignupJobData>,
+  ): Promise<void> {
     const provisioningJobId = job.data.provisioningJobId;
     const provisioningJob = await this.prisma.provisioningJob.findUnique({
       where: { id: provisioningJobId },
