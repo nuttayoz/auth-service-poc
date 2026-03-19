@@ -10,6 +10,8 @@ import { CryptoModule } from './crypto/crypto.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { LoggingModule } from './logging/logging.module.js';
 import { createBullConnection } from './queue/create-bull-connection.js';
+import { HealthController } from './health/health.controller.js';
+import { HealthService } from './health/health.service.js';
 
 @Module({
   imports: [
@@ -33,7 +35,7 @@ import { createBullConnection } from './queue/create-bull-connection.js';
     LoggingModule,
     PrismaModule,
   ],
-  controllers: [AppController],
-  providers: [AppService],
+  controllers: [AppController, HealthController],
+  providers: [AppService, HealthService],
 })
 export class AppModule {}
