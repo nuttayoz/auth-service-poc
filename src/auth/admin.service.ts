@@ -68,7 +68,7 @@ export class AdminService {
     session: SessionContext,
     payload: CreateUserPayload,
   ): Promise<ProvisioningJobResponse> {
-    const orgId = session.orgId;
+    const orgId = session.activeOrgId ?? session.orgId;
     if (!orgId) {
       throw new BadRequestException('Missing org');
     }
@@ -104,7 +104,7 @@ export class AdminService {
     session: SessionContext,
     jobId: string,
   ): Promise<ProvisioningJobResponse> {
-    const orgId = session.orgId;
+    const orgId = session.activeOrgId ?? session.orgId;
     if (!orgId) {
       throw new BadRequestException('Missing org');
     }

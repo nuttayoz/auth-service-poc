@@ -6,7 +6,13 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma, UserRole, UserStatus } from '@prisma/client';
+import {
+  Prisma,
+  UserOrgAccessSource,
+  UserOrgAccessStatus,
+  UserRole,
+  UserStatus,
+} from '@prisma/client';
 import type { User } from '@prisma/client';
 import { Request, Response } from 'express';
 import { CryptoService } from '../crypto/crypto.service.js';
@@ -176,7 +182,8 @@ export class AuthService {
     const session = await this.prisma.session.create({
       data: {
         userId: user.id,
-        orgId: user.orgId,
+        homeOrgId: user.homeOrgId,
+        activeOrgId: user.homeOrgId,
         accessExpiresAt,
         refreshExpiresAt: null,
         tokens: {
@@ -203,7 +210,9 @@ export class AuthService {
     res.json({
       sessionId: session.id,
       userId: user.id,
-      orgId: user.orgId,
+      homeOrgId: user.homeOrgId,
+      activeOrgId: session.activeOrgId,
+      orgId: session.activeOrgId,
       roles: [user.role],
     });
   }
@@ -513,42 +522,65 @@ export class AuthService {
   }): Promise<User> {
     const role = this.mapRolesToUserRole(params.roles);
 
-    await this.prisma.org.upsert({
-      where: { id: params.orgId },
-      create: { id: params.orgId },
-      update: {},
-    });
+    return this.prisma.$transaction(async (tx) => {
+      await tx.org.upsert({
+        where: { id: params.orgId },
+        create: { id: params.orgId },
+        update: {},
+      });
 
-    const existing = await this.prisma.user.findUnique({
-      where: { id: params.userId },
-    });
+      const existing = await tx.user.findUnique({
+        where: { id: params.userId },
+      });
 
-    if (existing) {
-      if (existing.status === UserStatus.DISABLED) {
+      if (existing?.status === UserStatus.DISABLED) {
         throw new UnauthorizedException('User is disabled');
       }
-      if (existing.orgId !== params.orgId) {
+      if (existing && existing.homeOrgId !== params.orgId) {
         throw new UnauthorizedException('User org mismatch');
       }
 
-      return this.prisma.user.update({
-        where: { id: params.userId },
-        data: {
-          email: params.email ?? existing.email,
+      const user = existing
+        ? await tx.user.update({
+            where: { id: params.userId },
+            data: {
+              email: params.email ?? existing.email,
+              role,
+              status: UserStatus.ACTIVE,
+            },
+          })
+        : await tx.user.create({
+            data: {
+              id: params.userId,
+              homeOrgId: params.orgId,
+              email: params.email,
+              role,
+              status: UserStatus.ACTIVE,
+            },
+          });
+
+      await tx.userOrgAccess.upsert({
+        where: {
+          userId_orgId: {
+            userId: params.userId,
+            orgId: params.orgId,
+          },
+        },
+        create: {
+          userId: params.userId,
+          orgId: params.orgId,
           role,
-          status: UserStatus.ACTIVE,
+          source: UserOrgAccessSource.DIRECT,
+          status: UserOrgAccessStatus.ACTIVE,
+        },
+        update: {
+          role,
+          source: UserOrgAccessSource.DIRECT,
+          status: UserOrgAccessStatus.ACTIVE,
         },
       });
-    }
 
-    return this.prisma.user.create({
-      data: {
-        id: params.userId,
-        orgId: params.orgId,
-        email: params.email,
-        role,
-        status: UserStatus.ACTIVE,
-      },
+      return user;
     });
   }
 
@@ -585,14 +617,19 @@ export class AuthService {
   }
 
   private buildSessionContext(
-    session: Pick<SessionWithTokens, 'id' | 'userId' | 'orgId'>,
+    session: Pick<
+      SessionWithTokens,
+      'id' | 'userId' | 'homeOrgId' | 'activeOrgId'
+    >,
     role: UserRole,
     accessExpiresAt: Date,
   ): SessionContext {
     return {
       id: session.id,
       userId: session.userId,
-      orgId: session.orgId ?? null,
+      homeOrgId: session.homeOrgId,
+      activeOrgId: session.activeOrgId ?? null,
+      orgId: session.activeOrgId ?? null,
       roles: [role],
       permissions: [],
       accessExpiresAt,

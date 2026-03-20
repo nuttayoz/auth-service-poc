@@ -4,6 +4,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 export type SessionContext = {
   id: string;
   userId: string;
+  homeOrgId: string | null;
+  activeOrgId: string | null;
   orgId: string | null;
   roles: string[];
   permissions: string[];
@@ -30,7 +32,9 @@ export class SessionService {
     return {
       id: session.id,
       userId: session.userId,
-      orgId: session.orgId ?? null,
+      homeOrgId: session.homeOrgId ?? null,
+      activeOrgId: session.activeOrgId ?? null,
+      orgId: session.activeOrgId ?? null,
       roles: [session.user.role],
       permissions: [],
       accessExpiresAt: session.accessExpiresAt,

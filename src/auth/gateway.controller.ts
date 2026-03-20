@@ -164,7 +164,7 @@ export class GatewayController {
 
     const signedHeaders: Record<string, string> = {
       'x-user-id': session.userId,
-      'x-org-id': session.orgId ?? '',
+      'x-org-id': session.activeOrgId ?? session.orgId ?? '',
       'x-roles': session.roles.join(','),
       'x-permissions': session.permissions.join(','),
       'x-signature-at': new Date().toISOString(),

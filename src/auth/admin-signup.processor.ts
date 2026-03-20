@@ -5,6 +5,8 @@ import {
   Prisma,
   ProvisioningJobStatus,
   ProvisioningJobType,
+  UserOrgAccessSource,
+  UserOrgAccessStatus,
   UserRole,
   UserStatus,
 } from '@prisma/client';
@@ -257,16 +259,37 @@ export class AdminSignupProcessor extends WorkerHost {
           where: { id: userId },
           create: {
             id: userId,
-            orgId,
+            homeOrgId: orgId,
             email: job.data.email,
             role: UserRole.ROOT,
             status: UserStatus.ACTIVE,
           },
           update: {
-            orgId,
+            homeOrgId: orgId,
             email: job.data.email,
             role: UserRole.ROOT,
             status: UserStatus.ACTIVE,
+          },
+        });
+
+        await tx.userOrgAccess.upsert({
+          where: {
+            userId_orgId: {
+              userId,
+              orgId,
+            },
+          },
+          create: {
+            userId,
+            orgId,
+            role: UserRole.ROOT,
+            source: UserOrgAccessSource.DIRECT,
+            status: UserOrgAccessStatus.ACTIVE,
+          },
+          update: {
+            role: UserRole.ROOT,
+            source: UserOrgAccessSource.DIRECT,
+            status: UserOrgAccessStatus.ACTIVE,
           },
         });
 

@@ -20,12 +20,15 @@ export class RootKeyController {
 
   @Get()
   async listRootKeys(@Session() session: SessionContext) {
-    return this.rootKeys.listRootKeys(session.orgId!);
+    return this.rootKeys.listRootKeys((session.activeOrgId ?? session.orgId)!);
   }
 
   @Post()
   async createRootKey(@Session() session: SessionContext) {
-    return this.rootKeys.createRootKey(session.userId, session.orgId!);
+    return this.rootKeys.createRootKey(
+      session.userId,
+      (session.activeOrgId ?? session.orgId)!,
+    );
   }
 
   @Post(':rootKeyId/rotate')
@@ -36,7 +39,7 @@ export class RootKeyController {
     return this.rootKeys.rotateRootKey(
       rootKeyId,
       session.userId,
-      session.orgId!,
+      (session.activeOrgId ?? session.orgId)!,
     );
   }
 
@@ -49,7 +52,7 @@ export class RootKeyController {
     return this.rootKeys.revokeRootKey(
       rootKeyId,
       session.userId,
-      session.orgId!,
+      (session.activeOrgId ?? session.orgId)!,
     );
   }
 }
