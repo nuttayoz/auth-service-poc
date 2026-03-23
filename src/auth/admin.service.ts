@@ -13,7 +13,12 @@ import {
   ProvisioningJob,
   ProvisioningJobStatus,
   ProvisioningJobType,
+  User,
+  UserOrgAccess,
+  UserOrgAccessSource,
+  UserOrgAccessStatus,
   UserRole,
+  UserStatus,
 } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { CryptoService } from '../crypto/crypto.service.js';
@@ -36,6 +41,28 @@ export type CreateUserPayload = {
 };
 
 export type RootCreateUserPayload = CreateUserPayload;
+
+export type GrantExternalAccessPayload = {
+  userId?: string;
+  email?: string;
+  projectGrantId?: string;
+  zitadelRoleAssignmentId?: string;
+};
+
+export type ExternalAccessResponse = {
+  id: string;
+  userId: string;
+  email: string | null;
+  homeOrgId: string;
+  orgId: string;
+  role: UserRole;
+  source: UserOrgAccessSource;
+  status: UserOrgAccessStatus;
+  projectGrantId: string | null;
+  zitadelRoleAssignmentId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 export type ProvisioningJobResponse = {
   id: string;
@@ -141,6 +168,148 @@ export class AdminService {
     }
 
     return this.toProvisioningJobResponse(job);
+  }
+
+  async listExternalAccesses(
+    session: SessionContext,
+  ): Promise<ExternalAccessResponse[]> {
+    const orgId = session.activeOrgId ?? session.orgId;
+    if (!orgId) {
+      throw new BadRequestException('Missing org');
+    }
+
+    const accesses = await this.prisma.userOrgAccess.findMany({
+      where: {
+        orgId,
+        source: UserOrgAccessSource.EXTERNAL,
+      },
+      include: { user: true },
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+    });
+
+    return accesses.map((access) =>
+      this.toExternalAccessResponse(access, access.user),
+    );
+  }
+
+  async grantExternalAccess(
+    session: SessionContext,
+    payload: GrantExternalAccessPayload,
+  ): Promise<ExternalAccessResponse> {
+    const orgId = session.activeOrgId ?? session.orgId;
+    if (!orgId) {
+      throw new BadRequestException('Missing org');
+    }
+
+    const user = await this.resolveUserForExternalAccess(payload);
+    if (user.status === UserStatus.DISABLED) {
+      throw new ConflictException('User is disabled');
+    }
+    if (user.homeOrgId === orgId) {
+      throw new ConflictException('User already belongs directly to this org');
+    }
+
+    const existing = await this.prisma.userOrgAccess.findUnique({
+      where: {
+        userId_orgId: {
+          userId: user.id,
+          orgId,
+        },
+      },
+    });
+
+    if (existing?.source === UserOrgAccessSource.DIRECT) {
+      throw new ConflictException(
+        'Direct org membership cannot be replaced with external access',
+      );
+    }
+
+    const access = await this.prisma.userOrgAccess.upsert({
+      where: {
+        userId_orgId: {
+          userId: user.id,
+          orgId,
+        },
+      },
+      create: {
+        userId: user.id,
+        orgId,
+        role: UserRole.USER,
+        source: UserOrgAccessSource.EXTERNAL,
+        status: UserOrgAccessStatus.ACTIVE,
+        projectGrantId: payload.projectGrantId?.trim() || null,
+        zitadelRoleAssignmentId:
+          payload.zitadelRoleAssignmentId?.trim() || null,
+      },
+      update: {
+        role: UserRole.USER,
+        source: UserOrgAccessSource.EXTERNAL,
+        status: UserOrgAccessStatus.ACTIVE,
+        projectGrantId: payload.projectGrantId?.trim() || null,
+        zitadelRoleAssignmentId:
+          payload.zitadelRoleAssignmentId?.trim() || null,
+      },
+    });
+
+    await this.writeAuditLogSafe(
+      session.userId,
+      'admin.external_access.grant',
+      {
+        orgId,
+        targetUserId: user.id,
+        targetEmail: user.email,
+        homeOrgId: user.homeOrgId,
+        role: UserRole.USER,
+        source: UserOrgAccessSource.EXTERNAL,
+        projectGrantId: access.projectGrantId,
+        zitadelRoleAssignmentId: access.zitadelRoleAssignmentId,
+      },
+    );
+
+    return this.toExternalAccessResponse(access, user);
+  }
+
+  async revokeExternalAccess(
+    session: SessionContext,
+    payload: GrantExternalAccessPayload,
+  ): Promise<ExternalAccessResponse> {
+    const orgId = session.activeOrgId ?? session.orgId;
+    if (!orgId) {
+      throw new BadRequestException('Missing org');
+    }
+
+    const user = await this.resolveUserForExternalAccess(payload);
+    const access = await this.prisma.userOrgAccess.findUnique({
+      where: {
+        userId_orgId: {
+          userId: user.id,
+          orgId,
+        },
+      },
+    });
+
+    if (!access || access.source !== UserOrgAccessSource.EXTERNAL) {
+      throw new NotFoundException('External access not found');
+    }
+
+    const revoked = await this.prisma.userOrgAccess.update({
+      where: { id: access.id },
+      data: { status: UserOrgAccessStatus.REVOKED },
+    });
+
+    await this.writeAuditLogSafe(
+      session.userId,
+      'admin.external_access.revoke',
+      {
+        orgId,
+        targetUserId: user.id,
+        targetEmail: user.email,
+        homeOrgId: user.homeOrgId,
+        source: UserOrgAccessSource.EXTERNAL,
+      },
+    );
+
+    return this.toExternalAccessResponse(revoked, user);
   }
 
   private async enqueueUserProvisioning(params: {
@@ -294,6 +463,49 @@ export class AdminService {
       updatedAt: job.updatedAt,
       startedAt: job.startedAt ?? null,
       completedAt: job.completedAt ?? null,
+    };
+  }
+
+  private async resolveUserForExternalAccess(
+    payload: GrantExternalAccessPayload,
+  ): Promise<User> {
+    const userId = payload.userId?.trim();
+    const email = payload.email?.trim().toLowerCase();
+
+    if ((userId ? 1 : 0) + (email ? 1 : 0) !== 1) {
+      throw new BadRequestException('Provide exactly one of userId or email');
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: userId ? { id: userId } : { email },
+    });
+
+    if (!user) {
+      throw new NotFoundException(
+        'User not found locally. The user must exist in auth-service before external access can be synced.',
+      );
+    }
+
+    return user;
+  }
+
+  private toExternalAccessResponse(
+    access: UserOrgAccess,
+    user: User,
+  ): ExternalAccessResponse {
+    return {
+      id: access.id,
+      userId: access.userId,
+      email: user.email ?? null,
+      homeOrgId: user.homeOrgId,
+      orgId: access.orgId,
+      role: access.role,
+      source: access.source,
+      status: access.status,
+      projectGrantId: access.projectGrantId ?? null,
+      zitadelRoleAssignmentId: access.zitadelRoleAssignmentId ?? null,
+      createdAt: access.createdAt,
+      updatedAt: access.updatedAt,
     };
   }
 
