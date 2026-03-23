@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -66,7 +67,8 @@ export class AuthService {
 
     const oidc = this.oidc.getModule();
     const config = await this.oidc.getConfig();
-    const scope = this.buildScope(options);
+    const requestedOrg = this.sanitizeRequestedOrgSelection(options);
+    const scope = this.buildScope(requestedOrg);
 
     const state = oidc.randomState();
     const codeVerifier = oidc.randomPKCECodeVerifier();
@@ -80,6 +82,8 @@ export class AuthService {
         state,
         codeVerifier,
         nonce,
+        requestedOrgId: requestedOrg.orgId,
+        requestedOrgDomain: requestedOrg.orgDomain,
         redirectUri: sanitizedRedirect,
       },
     });
@@ -150,7 +154,7 @@ export class AuthService {
 
     const claims = tokenSet?.claims?.() ?? {};
     const zitadelSub = this.extractUserId(claims);
-    const orgId = this.extractOrgId(claims);
+    const homeOrgId = this.extractOrgId(claims);
     const email = this.extractEmail(claims);
     let roles = this.extractRoles(claims, accessToken);
     if (roles.length === 0 && accessToken) {
@@ -169,9 +173,15 @@ export class AuthService {
     }
     const user = await this.resolveUserFromOidc({
       userId: zitadelSub,
-      orgId,
+      orgId: homeOrgId,
       email,
       roles,
+    });
+    const activeAccess = await this.resolveActiveOrgAccess({
+      userId: user.id,
+      homeOrgId: user.homeOrgId,
+      requestedOrgId: stored.requestedOrgId ?? undefined,
+      requestedOrgDomain: stored.requestedOrgDomain ?? undefined,
     });
 
     const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
@@ -183,7 +193,7 @@ export class AuthService {
       data: {
         userId: user.id,
         homeOrgId: user.homeOrgId,
-        activeOrgId: user.homeOrgId,
+        activeOrgId: activeAccess.orgId,
         accessExpiresAt,
         refreshExpiresAt: null,
         tokens: {
@@ -213,7 +223,7 @@ export class AuthService {
       homeOrgId: user.homeOrgId,
       activeOrgId: session.activeOrgId,
       orgId: session.activeOrgId,
-      roles: [user.role],
+      roles: [activeAccess.role],
     });
   }
 
@@ -242,11 +252,7 @@ export class AuthService {
 
     const { accessExpiresAt } = await this.getCurrentAccessToken(session);
 
-    return this.buildSessionContext(
-      session,
-      session.user.role,
-      accessExpiresAt,
-    );
+    return this.buildSessionContext(session, accessExpiresAt);
   }
 
   async revalidateSession(sessionId: string): Promise<SessionContext> {
@@ -268,12 +274,26 @@ export class AuthService {
       throw new UnauthorizedException('User is disabled');
     }
 
-    await this.prisma.user.update({
-      where: { id: session.userId },
-      data: { role, status: UserStatus.ACTIVE },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: session.userId },
+        data: { role, status: UserStatus.ACTIVE },
+      });
+
+      await tx.userOrgAccess.updateMany({
+        where: {
+          userId: session.userId,
+          orgId: session.homeOrgId,
+          source: UserOrgAccessSource.DIRECT,
+        },
+        data: {
+          role,
+          status: UserOrgAccessStatus.ACTIVE,
+        },
+      });
     });
 
-    return this.buildSessionContext(session, role, accessExpiresAt);
+    return this.buildSessionContext(session, accessExpiresAt);
   }
 
   private extractUserId(claims: Record<string, unknown>): string {
@@ -616,21 +636,25 @@ export class AuthService {
     return new Date(Date.now() + 3600 * 1000);
   }
 
-  private buildSessionContext(
+  private async buildSessionContext(
     session: Pick<
       SessionWithTokens,
       'id' | 'userId' | 'homeOrgId' | 'activeOrgId'
     >,
-    role: UserRole,
     accessExpiresAt: Date,
-  ): SessionContext {
+  ): Promise<SessionContext> {
+    const access = await this.loadActiveOrgAccess(
+      session.userId,
+      session.activeOrgId ?? session.homeOrgId,
+    );
+
     return {
       id: session.id,
       userId: session.userId,
       homeOrgId: session.homeOrgId,
-      activeOrgId: session.activeOrgId ?? null,
-      orgId: session.activeOrgId ?? null,
-      roles: [role],
+      activeOrgId: access.orgId,
+      orgId: access.orgId,
+      roles: [access.role],
       permissions: [],
       accessExpiresAt,
       accessExpired: accessExpiresAt <= new Date(),
@@ -679,11 +703,10 @@ export class AuthService {
     return null;
   }
 
-  private buildScope(options?: { orgId?: string; orgDomain?: string }): string {
-    const base = this.config.get<string>('ZITADEL_SCOPES') ?? DEFAULT_SCOPES;
-    const projectId =
-      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
-
+  private sanitizeRequestedOrgSelection(options?: {
+    orgId?: string;
+    orgDomain?: string;
+  }): { orgId?: string; orgDomain?: string } {
     const orgId = options?.orgId?.trim();
     const orgDomain = options?.orgDomain?.trim().toLowerCase();
 
@@ -692,10 +715,6 @@ export class AuthService {
         'Provide either orgId or orgDomain, not both',
       );
     }
-    if (!orgId && !orgDomain) {
-      throw new BadRequestException('Provide orgId or orgDomain');
-    }
-
     if (orgId && /\s/.test(orgId)) {
       throw new BadRequestException('orgId must not contain spaces');
     }
@@ -703,17 +722,101 @@ export class AuthService {
       throw new BadRequestException('orgDomain must not contain spaces');
     }
 
+    return {
+      ...(orgId ? { orgId } : {}),
+      ...(orgDomain ? { orgDomain } : {}),
+    };
+  }
+
+  private buildScope(options?: { orgId?: string; orgDomain?: string }): string {
+    const base = this.config.get<string>('ZITADEL_SCOPES') ?? DEFAULT_SCOPES;
+    const projectId =
+      this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
+    const orgDomain = options?.orgDomain;
+
     const roleScope = `urn:zitadel:iam:org:project:${projectId}:roles`;
     const scopes = new Set(base.split(' ').filter(Boolean));
     if (projectId) {
       scopes.add(roleScope);
     }
-    if (orgId) {
-      scopes.add(`urn:zitadel:iam:org:id:${orgId}`);
-    } else if (orgDomain) {
+    if (orgDomain) {
       scopes.add(`urn:zitadel:iam:org:domain:primary:${orgDomain}`);
     }
     return Array.from(scopes).join(' ');
+  }
+
+  private async resolveActiveOrgAccess(params: {
+    userId: string;
+    homeOrgId: string;
+    requestedOrgId?: string;
+    requestedOrgDomain?: string;
+  }) {
+    const accesses = await this.prisma.userOrgAccess.findMany({
+      where: {
+        userId: params.userId,
+        status: UserOrgAccessStatus.ACTIVE,
+      },
+      include: { org: true },
+      orderBy: [{ source: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    if (accesses.length === 0) {
+      throw new UnauthorizedException('No active org access found');
+    }
+
+    const requestedById = params.requestedOrgId
+      ? accesses.find((access) => access.orgId === params.requestedOrgId)
+      : null;
+    if (params.requestedOrgId) {
+      if (!requestedById) {
+        throw new ForbiddenException('No access to requested org');
+      }
+      this.assertAccessRoleAllowed(requestedById);
+      return requestedById;
+    }
+
+    const homeAccess =
+      accesses.find((access) => access.orgId === params.homeOrgId) ??
+      (accesses.length === 1 ? accesses[0] : null);
+
+    if (!homeAccess) {
+      throw new BadRequestException(
+        'Multiple org accesses found; specify orgId to choose the active org',
+      );
+    }
+
+    this.assertAccessRoleAllowed(homeAccess);
+    return homeAccess;
+  }
+
+  private async loadActiveOrgAccess(userId: string, orgId: string) {
+    const access = await this.prisma.userOrgAccess.findUnique({
+      where: {
+        userId_orgId: {
+          userId,
+          orgId,
+        },
+      },
+    });
+
+    if (!access || access.status !== UserOrgAccessStatus.ACTIVE) {
+      throw new UnauthorizedException('No active org access found');
+    }
+
+    this.assertAccessRoleAllowed(access);
+    return access;
+  }
+
+  private assertAccessRoleAllowed(access: {
+    source: UserOrgAccessSource;
+    role: UserRole;
+  }): void {
+    if (
+      access.source === UserOrgAccessSource.EXTERNAL &&
+      access.role === UserRole.ROOT
+    ) {
+      throw new ForbiddenException('External org access cannot be root');
+    }
   }
 
   private assertOidcEnabled(): void {

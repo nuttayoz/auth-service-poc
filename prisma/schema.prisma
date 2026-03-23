@@ -207,6 +207,8 @@ model OidcRequest {
   state        String   @unique
   codeVerifier String
   nonce        String
+  requestedOrgId String?
+  requestedOrgDomain String?
   redirectUri  String?
   createdAt    DateTime @default(now())
 
