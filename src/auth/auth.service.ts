@@ -154,8 +154,11 @@ export class AuthService {
 
     const claims = tokenSet?.claims?.() ?? {};
     const zitadelSub = this.extractUserId(claims);
-    const homeOrgId = this.extractOrgId(claims);
     const email = this.extractEmail(claims);
+    this.logger.log({
+      event: 'oidc.home_org.claims.id_token',
+      claimKeys: this.getOrgClaimKeysPresent(claims),
+    });
     let roles = this.extractRoles(claims, accessToken);
     if (roles.length === 0 && accessToken) {
       try {
@@ -171,6 +174,11 @@ export class AuthService {
         this.logger.warn(`Userinfo request failed: ${message}`);
       }
     }
+    const homeOrgId = await this.resolveHomeOrgId(
+      claims,
+      accessToken,
+      zitadelSub,
+    );
     const user = await this.resolveUserFromOidc({
       userId: zitadelSub,
       orgId: homeOrgId,
@@ -223,6 +231,7 @@ export class AuthService {
       homeOrgId: user.homeOrgId,
       activeOrgId: session.activeOrgId,
       orgId: session.activeOrgId,
+      accessSource: activeAccess.source,
       roles: [activeAccess.role],
     });
   }
@@ -242,6 +251,60 @@ export class AuthService {
 
     this.clearSessionCookie(res);
     res.status(204).send();
+  }
+
+  async switchActiveOrg(
+    session: SessionContext,
+    orgId: string | undefined,
+  ): Promise<SessionContext> {
+    const targetOrgId = orgId?.trim();
+    if (!targetOrgId) {
+      throw new BadRequestException('orgId is required');
+    }
+    if (/\s/.test(targetOrgId)) {
+      throw new BadRequestException('orgId must not contain spaces');
+    }
+
+    const targetAccess = await this.loadActiveOrgAccess(
+      session.userId,
+      targetOrgId,
+    );
+
+    if (session.activeOrgId === targetOrgId) {
+      return {
+        ...session,
+        activeOrgId: targetOrgId,
+        orgId: targetOrgId,
+        accessSource: targetAccess.source,
+        roles: [targetAccess.role],
+      };
+    }
+
+    await this.prisma.session.update({
+      where: { id: session.id },
+      data: { activeOrgId: targetOrgId },
+    });
+
+    await this.writeAuditLogSafe(
+      session.userId,
+      'auth.session.active_org.switch',
+      {
+        sessionId: session.id,
+        homeOrgId: session.homeOrgId,
+        previousActiveOrgId: session.activeOrgId,
+        activeOrgId: targetOrgId,
+        role: targetAccess.role,
+        source: targetAccess.source,
+      },
+    );
+
+    return {
+      ...session,
+      activeOrgId: targetOrgId,
+      orgId: targetOrgId,
+      accessSource: targetAccess.source,
+      roles: [targetAccess.role],
+    };
   }
 
   async refreshSession(sessionId: string): Promise<SessionContext> {
@@ -308,12 +371,116 @@ export class AuthService {
     const orgId =
       (typeof claims['org_id'] === 'string' && claims['org_id']) ||
       (typeof claims['orgId'] === 'string' && claims['orgId']) ||
+      (typeof claims['urn:zitadel:iam:user:resourceowner:id'] === 'string' &&
+        claims['urn:zitadel:iam:user:resourceowner:id']) ||
       (typeof claims['urn:zitadel:iam:org:id'] === 'string' &&
         claims['urn:zitadel:iam:org:id']);
     if (typeof orgId === 'string' && orgId.length > 0) {
       return orgId;
     }
     throw new UnauthorizedException('Missing org id');
+  }
+
+  private async resolveHomeOrgId(
+    claims: Record<string, unknown>,
+    accessToken: string,
+    userId: string,
+  ): Promise<string> {
+    const directOrgId = this.tryExtractOrgId(claims);
+    if (directOrgId) {
+      this.logger.log({
+        event: 'oidc.home_org.resolved',
+        source: 'id_token',
+        orgId: directOrgId,
+      });
+      return directOrgId;
+    }
+
+    const accessClaims = this.decodeJwtPayload(accessToken);
+    if (accessClaims) {
+      this.logger.log({
+        event: 'oidc.home_org.claims.access_token',
+        claimKeys: this.getOrgClaimKeysPresent(accessClaims),
+      });
+    } else {
+      this.logger.warn({
+        event: 'oidc.home_org.claims.access_token',
+        claimKeys: [],
+        message: 'access token is opaque or could not be decoded',
+      });
+    }
+    const accessOrgId = accessClaims
+      ? this.tryExtractOrgId(accessClaims)
+      : null;
+    if (accessOrgId) {
+      this.logger.log({
+        event: 'oidc.home_org.resolved',
+        source: 'access_token',
+        orgId: accessOrgId,
+      });
+      return accessOrgId;
+    }
+
+    const oidc = this.oidc.getModule();
+    const config = await this.oidc.getConfig();
+
+    try {
+      const userInfo = (await oidc.fetchUserInfo(
+        config,
+        accessToken,
+        userId,
+      )) as Record<string, unknown>;
+      this.logger.log({
+        event: 'oidc.home_org.claims.userinfo',
+        claimKeys: this.getOrgClaimKeysPresent(userInfo),
+      });
+      const userInfoOrgId = this.tryExtractOrgId(userInfo);
+      if (userInfoOrgId) {
+        this.logger.log({
+          event: 'oidc.home_org.resolved',
+          source: 'userinfo',
+          orgId: userInfoOrgId,
+        });
+        return userInfoOrgId;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(
+        `Userinfo request failed while resolving home org: ${message}`,
+      );
+    }
+
+    throw new UnauthorizedException('Missing org id');
+  }
+
+  private tryExtractOrgId(claims: Record<string, unknown>): string | null {
+    const orgId =
+      (typeof claims['org_id'] === 'string' && claims['org_id']) ||
+      (typeof claims['orgId'] === 'string' && claims['orgId']) ||
+      (typeof claims['urn:zitadel:iam:user:resourceowner:id'] === 'string' &&
+        claims['urn:zitadel:iam:user:resourceowner:id']) ||
+      (typeof claims['urn:zitadel:iam:org:id'] === 'string' &&
+        claims['urn:zitadel:iam:org:id']);
+
+    if (typeof orgId === 'string' && orgId.length > 0) {
+      return orgId;
+    }
+
+    return null;
+  }
+
+  private getOrgClaimKeysPresent(claims: Record<string, unknown>): string[] {
+    const candidates = [
+      'org_id',
+      'orgId',
+      'urn:zitadel:iam:user:resourceowner:id',
+      'urn:zitadel:iam:org:id',
+    ];
+
+    return candidates.filter((key) => {
+      const value = claims[key];
+      return typeof value === 'string' && value.length > 0;
+    });
   }
 
   private extractEmail(claims: Record<string, unknown>): string | null {
@@ -654,6 +821,7 @@ export class AuthService {
       homeOrgId: session.homeOrgId,
       activeOrgId: access.orgId,
       orgId: access.orgId,
+      accessSource: access.source,
       roles: [access.role],
       permissions: [],
       accessExpiresAt,
@@ -733,12 +901,14 @@ export class AuthService {
     const projectId =
       this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
     const orgDomain = options?.orgDomain;
+    const resourceOwnerScope = 'urn:zitadel:iam:user:resourceowner';
 
     const roleScope = `urn:zitadel:iam:org:project:${projectId}:roles`;
     const scopes = new Set(base.split(' ').filter(Boolean));
     if (projectId) {
       scopes.add(roleScope);
     }
+    scopes.add(resourceOwnerScope);
     if (orgDomain) {
       scopes.add(`urn:zitadel:iam:org:domain:primary:${orgDomain}`);
     }
@@ -816,6 +986,27 @@ export class AuthService {
       access.role === UserRole.ROOT
     ) {
       throw new ForbiddenException('External org access cannot be root');
+    }
+  }
+
+  private async writeAuditLogSafe(
+    actorUserId: string | null,
+    action: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actorUserId,
+          action,
+          metadata: metadata as Prisma.InputJsonValue,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(
+        `Audit log write failed for action "${action}": ${message}`,
+      );
     }
   }
 

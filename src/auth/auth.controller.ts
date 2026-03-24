@@ -16,6 +16,7 @@ import { AdminSignupService } from './admin-signup.service.js';
 import { AuthService } from './auth.service.js';
 import { Session } from './session.decorator.js';
 import { SessionGuard } from './session.guard.js';
+import type { SessionContext } from './session.service.js';
 
 @Controller('auth')
 export class AuthController {
@@ -70,5 +71,14 @@ export class AuthController {
   @UseGuards(SessionGuard)
   me(@Session() session: unknown) {
     return session;
+  }
+
+  @Post('session/active-org')
+  @UseGuards(SessionGuard)
+  switchActiveOrg(
+    @Session() session: SessionContext,
+    @Body() body: { orgId?: string },
+  ) {
+    return this.auth.switchActiveOrg(session, body.orgId);
   }
 }

@@ -12,6 +12,7 @@ export type SessionContext = {
   homeOrgId: string | null;
   activeOrgId: string | null;
   orgId: string | null;
+  accessSource?: UserOrgAccessSource;
   roles: string[];
   permissions: string[];
   accessExpiresAt: Date;
@@ -60,6 +61,7 @@ export class SessionService {
       homeOrgId: session.homeOrgId ?? null,
       activeOrgId: orgId,
       orgId,
+      accessSource: access.source,
       roles: [access.role],
       permissions: [],
       accessExpiresAt: session.accessExpiresAt,
