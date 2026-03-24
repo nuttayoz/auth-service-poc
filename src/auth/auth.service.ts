@@ -264,6 +264,11 @@ export class AuthService {
     if (/\s/.test(targetOrgId)) {
       throw new BadRequestException('orgId must not contain spaces');
     }
+    if (session.homeOrgId && targetOrgId !== session.homeOrgId) {
+      throw new ForbiddenException(
+        'Cross-org tenant switching is disabled until ZITADEL-backed authorization is implemented',
+      );
+    }
 
     const targetAccess = await this.loadActiveOrgAccess(
       session.userId,
@@ -938,11 +943,22 @@ export class AuthService {
       ? accesses.find((access) => access.orgId === params.requestedOrgId)
       : null;
     if (params.requestedOrgId) {
+      if (params.requestedOrgId !== params.homeOrgId) {
+        throw new ForbiddenException(
+          'Cross-org login is disabled until ZITADEL-backed authorization is implemented',
+        );
+      }
       if (!requestedById) {
         throw new ForbiddenException('No access to requested org');
       }
       this.assertAccessRoleAllowed(requestedById);
       return requestedById;
+    }
+
+    if (params.requestedOrgDomain) {
+      throw new ForbiddenException(
+        'Cross-org login via orgDomain is disabled until ZITADEL-backed authorization is implemented',
+      );
     }
 
     const homeAccess =

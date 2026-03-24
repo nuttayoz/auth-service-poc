@@ -18,7 +18,6 @@ import {
   UserOrgAccessSource,
   UserOrgAccessStatus,
   UserRole,
-  UserStatus,
 } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { CryptoService } from '../crypto/crypto.service.js';
@@ -170,146 +169,30 @@ export class AdminService {
     return this.toProvisioningJobResponse(job);
   }
 
-  async listExternalAccesses(
+  listExternalAccesses(
     session: SessionContext,
   ): Promise<ExternalAccessResponse[]> {
-    const orgId = session.activeOrgId ?? session.orgId;
-    if (!orgId) {
-      throw new BadRequestException('Missing org');
-    }
-
-    const accesses = await this.prisma.userOrgAccess.findMany({
-      where: {
-        orgId,
-        source: UserOrgAccessSource.EXTERNAL,
-      },
-      include: { user: true },
-      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
-    });
-
-    return accesses.map((access) =>
-      this.toExternalAccessResponse(access, access.user),
+    throw new ServiceUnavailableException(
+      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)}`,
     );
   }
 
-  async grantExternalAccess(
+  grantExternalAccess(
     session: SessionContext,
     payload: GrantExternalAccessPayload,
   ): Promise<ExternalAccessResponse> {
-    const orgId = session.activeOrgId ?? session.orgId;
-    if (!orgId) {
-      throw new BadRequestException('Missing org');
-    }
-
-    const user = await this.resolveUserForExternalAccess(payload);
-    if (user.status === UserStatus.DISABLED) {
-      throw new ConflictException('User is disabled');
-    }
-    if (user.homeOrgId === orgId) {
-      throw new ConflictException('User already belongs directly to this org');
-    }
-
-    const existing = await this.prisma.userOrgAccess.findUnique({
-      where: {
-        userId_orgId: {
-          userId: user.id,
-          orgId,
-        },
-      },
-    });
-
-    if (existing?.source === UserOrgAccessSource.DIRECT) {
-      throw new ConflictException(
-        'Direct org membership cannot be replaced with external access',
-      );
-    }
-
-    const access = await this.prisma.userOrgAccess.upsert({
-      where: {
-        userId_orgId: {
-          userId: user.id,
-          orgId,
-        },
-      },
-      create: {
-        userId: user.id,
-        orgId,
-        role: UserRole.USER,
-        source: UserOrgAccessSource.EXTERNAL,
-        status: UserOrgAccessStatus.ACTIVE,
-        projectGrantId: payload.projectGrantId?.trim() || null,
-        zitadelRoleAssignmentId:
-          payload.zitadelRoleAssignmentId?.trim() || null,
-      },
-      update: {
-        role: UserRole.USER,
-        source: UserOrgAccessSource.EXTERNAL,
-        status: UserOrgAccessStatus.ACTIVE,
-        projectGrantId: payload.projectGrantId?.trim() || null,
-        zitadelRoleAssignmentId:
-          payload.zitadelRoleAssignmentId?.trim() || null,
-      },
-    });
-
-    await this.writeAuditLogSafe(
-      session.userId,
-      'admin.external_access.grant',
-      {
-        orgId,
-        targetUserId: user.id,
-        targetEmail: user.email,
-        homeOrgId: user.homeOrgId,
-        role: UserRole.USER,
-        source: UserOrgAccessSource.EXTERNAL,
-        projectGrantId: access.projectGrantId,
-        zitadelRoleAssignmentId: access.zitadelRoleAssignmentId,
-      },
+    throw new ServiceUnavailableException(
+      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)} and ${JSON.stringify(payload)}`,
     );
-
-    return this.toExternalAccessResponse(access, user);
   }
 
-  async revokeExternalAccess(
+  revokeExternalAccess(
     session: SessionContext,
     payload: GrantExternalAccessPayload,
   ): Promise<ExternalAccessResponse> {
-    const orgId = session.activeOrgId ?? session.orgId;
-    if (!orgId) {
-      throw new BadRequestException('Missing org');
-    }
-
-    const user = await this.resolveUserForExternalAccess(payload);
-    const access = await this.prisma.userOrgAccess.findUnique({
-      where: {
-        userId_orgId: {
-          userId: user.id,
-          orgId,
-        },
-      },
-    });
-
-    if (!access || access.source !== UserOrgAccessSource.EXTERNAL) {
-      throw new NotFoundException('External access not found');
-    }
-
-    const revoked = await this.prisma.userOrgAccess.update({
-      where: { id: access.id },
-      data: { status: UserOrgAccessStatus.REVOKED },
-    });
-
-    await this.writeAuditLogSafe(
-      session.userId,
-      'admin.external_access.revoke',
-      {
-        orgId,
-        targetUserId: user.id,
-        targetEmail: user.email,
-        homeOrgId: user.homeOrgId,
-        source: UserOrgAccessSource.EXTERNAL,
-      },
+    throw new ServiceUnavailableException(
+      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)} ${JSON.stringify(payload)}`,
     );
-
-    return this.toExternalAccessResponse(revoked, user);
   }
 
   private async enqueueUserProvisioning(params: {
