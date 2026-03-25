@@ -1,5 +1,6 @@
 import {
   Controller,
+  ForbiddenException,
   Get,
   HttpCode,
   HttpStatus,
@@ -20,14 +21,14 @@ export class RootKeyController {
 
   @Get()
   async listRootKeys(@Session() session: SessionContext) {
-    return this.rootKeys.listRootKeys((session.activeOrgId ?? session.orgId)!);
+    return this.rootKeys.listRootKeys(this.requireActiveOrgId(session));
   }
 
   @Post()
   async createRootKey(@Session() session: SessionContext) {
     return this.rootKeys.createRootKey(
       session.userId,
-      (session.activeOrgId ?? session.orgId)!,
+      this.requireActiveOrgId(session),
     );
   }
 
@@ -39,7 +40,7 @@ export class RootKeyController {
     return this.rootKeys.rotateRootKey(
       rootKeyId,
       session.userId,
-      (session.activeOrgId ?? session.orgId)!,
+      this.requireActiveOrgId(session),
     );
   }
 
@@ -52,7 +53,15 @@ export class RootKeyController {
     return this.rootKeys.revokeRootKey(
       rootKeyId,
       session.userId,
-      (session.activeOrgId ?? session.orgId)!,
+      this.requireActiveOrgId(session),
     );
+  }
+
+  private requireActiveOrgId(session: SessionContext): string {
+    const activeOrgId = session.activeOrgId ?? session.orgId;
+    if (!activeOrgId) {
+      throw new ForbiddenException('Missing active org');
+    }
+    return activeOrgId;
   }
 }

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -190,7 +191,10 @@ export class RootKeyService {
     return this.toSummary(revoked);
   }
 
-  async validateRootKey(rawKey: string): Promise<RootKeySummary> {
+  async validateRootKey(
+    rawKey: string,
+    expectedOrgId?: string,
+  ): Promise<RootKeySummary> {
     const key = rawKey.trim();
     if (!key) {
       throw new UnauthorizedException('Missing root key');
@@ -205,6 +209,11 @@ export class RootKeyService {
 
     if (!rootKey) {
       throw new UnauthorizedException('Invalid root key');
+    }
+    if (expectedOrgId && rootKey.orgId !== expectedOrgId) {
+      throw new ForbiddenException(
+        'Root key is not valid for the requested org',
+      );
     }
 
     const updated = await this.prisma.rootKey.update({
