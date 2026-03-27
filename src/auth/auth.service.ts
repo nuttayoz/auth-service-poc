@@ -204,6 +204,13 @@ export class AuthService {
     });
 
     const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
+    const now = new Date();
+    const sessionAbsoluteExpiry = this.resolveSessionAbsoluteExpiry(now);
+    const refreshExpiresAt = this.resolveRefreshExpiry(tokenSet, {
+      sessionCreatedAt: now,
+      sessionAbsoluteExpiry,
+      now,
+    });
 
     const encAccess = this.crypto.encrypt(accessToken);
     const encRefresh = this.crypto.encrypt(refreshToken);
@@ -213,10 +220,10 @@ export class AuthService {
         userId: user.id,
         homeOrgId: user.homeOrgId,
         activeOrgId: activeAccess.orgId,
-        expiresAt: this.resolveSessionAbsoluteExpiry(),
-        lastActivityAt: new Date(),
+        expiresAt: sessionAbsoluteExpiry,
+        lastActivityAt: now,
         accessExpiresAt,
-        refreshExpiresAt: null,
+        refreshExpiresAt,
         tokens: {
           create: {
             accessTokenEnc: Buffer.from(encAccess.ciphertext, 'base64'),
@@ -892,6 +899,7 @@ export class AuthService {
     session: SessionWithTokens,
     options: { forceRefresh?: boolean } = {},
   ): Promise<{ accessToken: string; accessExpiresAt: Date }> {
+    session = await this.ensureRefreshExpiryTracked(session);
     const now = Date.now();
     const shouldRefresh =
       options.forceRefresh === true ||
@@ -902,6 +910,14 @@ export class AuthService {
         accessToken: this.decryptSessionAccessToken(session),
         accessExpiresAt: session.accessExpiresAt,
       };
+    }
+
+    if (
+      session.refreshExpiresAt &&
+      session.refreshExpiresAt.getTime() <= Date.now()
+    ) {
+      await this.invalidateSession(session.id);
+      throw new UnauthorizedException('Session can no longer be refreshed');
     }
 
     const refreshToken = this.decryptSessionRefreshToken(session);
@@ -930,6 +946,11 @@ export class AuthService {
 
     const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
     const newRefreshToken = tokenSet?.refresh_token || refreshToken;
+    const refreshExpiresAt = this.resolveRefreshExpiry(tokenSet, {
+      sessionCreatedAt: session.createdAt,
+      sessionAbsoluteExpiry: session.expiresAt,
+      now: new Date(),
+    });
     const encAccess = this.crypto.encrypt(accessToken);
     const encRefresh = this.crypto.encrypt(newRefreshToken);
 
@@ -937,6 +958,7 @@ export class AuthService {
       where: { id: session.id },
       data: {
         accessExpiresAt,
+        refreshExpiresAt,
         tokens: {
           upsert: {
             create: {
@@ -1132,11 +1154,76 @@ export class AuthService {
     return new Date(Date.now() + 3600 * 1000);
   }
 
-  private resolveSessionAbsoluteExpiry(): Date {
+  private resolveSessionAbsoluteExpiry(from: Date = new Date()): Date {
     const absoluteMaxAgeSec =
       this.config.get<number>('SESSION_ABSOLUTE_MAX_AGE_SEC') ??
       60 * 60 * 24 * 30;
-    return new Date(Date.now() + absoluteMaxAgeSec * 1000);
+    return new Date(from.getTime() + absoluteMaxAgeSec * 1000);
+  }
+
+  private resolveRefreshExpiry(
+    tokenSet: any,
+    params: {
+      sessionCreatedAt: Date;
+      sessionAbsoluteExpiry: Date;
+      now?: Date;
+    },
+  ): Date {
+    const now = params.now ?? new Date();
+    const providerRefreshExpiry = this.resolveProviderRefreshExpiry(
+      tokenSet,
+      now,
+    );
+    if (providerRefreshExpiry) {
+      return providerRefreshExpiry < params.sessionAbsoluteExpiry
+        ? providerRefreshExpiry
+        : params.sessionAbsoluteExpiry;
+    }
+
+    const refreshIdleTimeoutSec =
+      this.config.get<number>('REFRESH_TOKEN_IDLE_TIMEOUT_SEC') ??
+      60 * 60 * 24 * 30;
+    const refreshAbsoluteMaxAgeSec =
+      this.config.get<number>('REFRESH_TOKEN_ABSOLUTE_MAX_AGE_SEC') ??
+      60 * 60 * 24 * 90;
+
+    const idleExpiry = new Date(now.getTime() + refreshIdleTimeoutSec * 1000);
+    const absoluteRefreshExpiry = new Date(
+      params.sessionCreatedAt.getTime() + refreshAbsoluteMaxAgeSec * 1000,
+    );
+
+    return [
+      params.sessionAbsoluteExpiry,
+      idleExpiry,
+      absoluteRefreshExpiry,
+    ].sort((a, b) => a.getTime() - b.getTime())[0];
+  }
+
+  private resolveProviderRefreshExpiry(tokenSet: any, now: Date): Date | null {
+    const candidates = [
+      typeof tokenSet?.refreshTokenExpiresIn === 'function'
+        ? tokenSet.refreshTokenExpiresIn()
+        : undefined,
+      typeof tokenSet?.refreshExpiresIn === 'function'
+        ? tokenSet.refreshExpiresIn()
+        : undefined,
+      typeof tokenSet?.refresh_token_expires_in === 'number'
+        ? tokenSet.refresh_token_expires_in
+        : undefined,
+      typeof tokenSet?.refresh_expires_in === 'number'
+        ? tokenSet.refresh_expires_in
+        : undefined,
+    ];
+
+    const expiresIn = candidates.find(
+      (value): value is number => typeof value === 'number' && value > 0,
+    );
+
+    if (!expiresIn) {
+      return null;
+    }
+
+    return new Date(now.getTime() + expiresIn * 1000);
   }
 
   private getSessionIdleTimeoutMs(): number {
@@ -1144,6 +1231,30 @@ export class AuthService {
       (this.config.get<number>('SESSION_IDLE_TIMEOUT_SEC') ??
         60 * 60 * 24 * 7) * 1000
     );
+  }
+
+  private async ensureRefreshExpiryTracked(
+    session: SessionWithTokens,
+  ): Promise<SessionWithTokens> {
+    if (session.refreshExpiresAt) {
+      return session;
+    }
+
+    const refreshExpiresAt = this.resolveRefreshExpiry(null, {
+      sessionCreatedAt: session.createdAt,
+      sessionAbsoluteExpiry: session.expiresAt,
+      now: new Date(),
+    });
+
+    await this.prisma.session.update({
+      where: { id: session.id },
+      data: { refreshExpiresAt },
+    });
+
+    return {
+      ...session,
+      refreshExpiresAt,
+    };
   }
 
   private async assertSessionIsActive(session: {

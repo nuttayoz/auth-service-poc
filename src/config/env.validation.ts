@@ -105,6 +105,14 @@ export const envValidationSchema = Joi.object({
     .integer()
     .min(60 * 60)
     .default(60 * 60 * 24 * 30),
+  REFRESH_TOKEN_IDLE_TIMEOUT_SEC: Joi.number()
+    .integer()
+    .min(60 * 60)
+    .default(60 * 60 * 24 * 30),
+  REFRESH_TOKEN_ABSOLUTE_MAX_AGE_SEC: Joi.number()
+    .integer()
+    .min(60 * 60)
+    .default(60 * 60 * 24 * 90),
 
   // Queue / Redis
   REDIS_URL: Joi.string().uri().required(),
@@ -143,6 +151,16 @@ export const envValidationSchema = Joi.object({
       return helpers.message({
         custom:
           'SESSION_COOKIE_MAX_AGE_SEC must be less than or equal to SESSION_IDLE_TIMEOUT_SEC',
+      });
+    }
+
+    if (
+      value.REFRESH_TOKEN_IDLE_TIMEOUT_SEC >
+      value.REFRESH_TOKEN_ABSOLUTE_MAX_AGE_SEC
+    ) {
+      return helpers.message({
+        custom:
+          'REFRESH_TOKEN_IDLE_TIMEOUT_SEC must be less than or equal to REFRESH_TOKEN_ABSOLUTE_MAX_AGE_SEC',
       });
     }
 
