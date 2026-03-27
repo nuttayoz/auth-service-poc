@@ -170,10 +170,10 @@ export class AdminService {
   }
 
   listExternalAccesses(
-    session: SessionContext,
+    _session: SessionContext,
   ): Promise<ExternalAccessResponse[]> {
     throw new ServiceUnavailableException(
-      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)}`,
+      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented`,
     );
   }
 
@@ -182,7 +182,7 @@ export class AdminService {
     payload: GrantExternalAccessPayload,
   ): Promise<ExternalAccessResponse> {
     throw new ServiceUnavailableException(
-      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)} and ${JSON.stringify(payload)}`,
+      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)} ${JSON.stringify(payload)}`,
     );
   }
 

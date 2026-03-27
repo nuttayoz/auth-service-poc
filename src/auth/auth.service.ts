@@ -38,6 +38,12 @@ type SessionWithTokens = Prisma.SessionGetPayload<{
   >;
 };
 
+type AuthorizedOrgAccess = {
+  orgId: string;
+  primaryDomain: string | null;
+  role: UserRole;
+  source: UserOrgAccessSource;
+};
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -159,34 +165,38 @@ export class AuthService {
       event: 'oidc.home_org.claims.id_token',
       claimKeys: this.getOrgClaimKeysPresent(claims),
     });
-    let roles = this.extractRoles(claims, accessToken);
-    if (roles.length === 0 && accessToken) {
-      try {
-        const userInfo = (await oidc.fetchUserInfo(
-          config,
-          accessToken,
-          zitadelSub,
-        )) as Record<string, unknown>;
-        roles = this.extractRoles(userInfo);
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : 'unknown error';
-        this.logger.warn(`Userinfo request failed: ${message}`);
-      }
-    }
+    const userInfo = await this.loadUserInfoClaims(accessToken, zitadelSub);
     const homeOrgId = await this.resolveHomeOrgId(
       claims,
       accessToken,
       zitadelSub,
+      userInfo,
     );
+    const authorizedAccesses = await this.resolveAuthorizedOrgAccesses({
+      claims,
+      accessToken,
+      userId: zitadelSub,
+      homeOrgId,
+      userInfo,
+    });
+    const homeAccess =
+      authorizedAccesses.find(
+        (access) =>
+          access.orgId === homeOrgId &&
+          access.source === UserOrgAccessSource.DIRECT,
+      ) ?? null;
     const user = await this.resolveUserFromOidc({
       userId: zitadelSub,
-      orgId: homeOrgId,
+      homeOrgId,
       email,
-      roles,
+      role: homeAccess?.role ?? UserRole.USER,
     });
-    const activeAccess = await this.resolveActiveOrgAccess({
-      userId: user.id,
+    await this.syncAuthorizedOrgAccessProjection(user.id, {
+      homeOrgId: user.homeOrgId,
+      accesses: authorizedAccesses,
+    });
+    const activeAccess = this.resolveActiveOrgAccess({
+      accesses: authorizedAccesses,
       homeOrgId: user.homeOrgId,
       requestedOrgId: stored.requestedOrgId ?? undefined,
       requestedOrgDomain: stored.requestedOrgDomain ?? undefined,
@@ -264,20 +274,32 @@ export class AuthService {
     if (/\s/.test(targetOrgId)) {
       throw new BadRequestException('orgId must not contain spaces');
     }
-    if (session.homeOrgId && targetOrgId !== session.homeOrgId) {
-      throw new ForbiddenException(
-        'Cross-org tenant switching is disabled until ZITADEL-backed authorization is implemented',
-      );
-    }
 
-    const targetAccess = await this.loadActiveOrgAccess(
-      session.userId,
+    const sessionRecord = await this.loadSessionWithTokens(session.id);
+    const { accessToken, accessExpiresAt } =
+      await this.getCurrentAccessToken(sessionRecord);
+    const userInfo = await this.loadUserInfoClaims(accessToken, session.userId);
+    const authorizedAccesses = await this.resolveAuthorizedOrgAccesses({
+      claims: this.decodeJwtPayload(accessToken) ?? {},
+      accessToken,
+      userId: session.userId,
+      homeOrgId: sessionRecord.homeOrgId,
+      userInfo,
+    });
+    await this.syncAuthorizedOrgAccessProjection(session.userId, {
+      homeOrgId: sessionRecord.homeOrgId,
+      accesses: authorizedAccesses,
+    });
+    const targetAccess = this.requireAuthorizedOrgAccess(
+      authorizedAccesses,
       targetOrgId,
     );
 
     if (session.activeOrgId === targetOrgId) {
       return {
         ...session,
+        accessExpiresAt,
+        accessExpired: accessExpiresAt <= new Date(),
         activeOrgId: targetOrgId,
         orgId: targetOrgId,
         accessSource: targetAccess.source,
@@ -305,6 +327,8 @@ export class AuthService {
 
     return {
       ...session,
+      accessExpiresAt,
+      accessExpired: accessExpiresAt <= new Date(),
       activeOrgId: targetOrgId,
       orgId: targetOrgId,
       accessSource: targetAccess.source,
@@ -313,55 +337,17 @@ export class AuthService {
   }
 
   async refreshSession(sessionId: string): Promise<SessionContext> {
-    this.assertOidcEnabled();
-    this.assertCryptoEnabled();
+    return this.syncSessionAuthorization(sessionId);
+  }
 
-    const session = await this.loadSessionWithTokens(sessionId);
-
-    const { accessExpiresAt } = await this.getCurrentAccessToken(session);
-
-    return this.buildSessionContext(session, accessExpiresAt);
+  async validateSessionAuthorization(
+    sessionId: string,
+  ): Promise<SessionContext> {
+    return this.syncSessionAuthorization(sessionId);
   }
 
   async revalidateSession(sessionId: string): Promise<SessionContext> {
-    this.assertOidcEnabled();
-    this.assertCryptoEnabled();
-
-    const session = await this.loadSessionWithTokens(sessionId);
-    const { accessToken, accessExpiresAt } = await this.getCurrentAccessToken(
-      session,
-      { forceRefresh: true },
-    );
-    const roles = await this.resolveRolesForSubject(
-      session.userId,
-      accessToken,
-    );
-    const role = this.mapRolesToUserRole(roles);
-
-    if (session.user.status === UserStatus.DISABLED) {
-      throw new UnauthorizedException('User is disabled');
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.user.update({
-        where: { id: session.userId },
-        data: { role, status: UserStatus.ACTIVE },
-      });
-
-      await tx.userOrgAccess.updateMany({
-        where: {
-          userId: session.userId,
-          orgId: session.homeOrgId,
-          source: UserOrgAccessSource.DIRECT,
-        },
-        data: {
-          role,
-          status: UserOrgAccessStatus.ACTIVE,
-        },
-      });
-    });
-
-    return this.buildSessionContext(session, accessExpiresAt);
+    return this.syncSessionAuthorization(sessionId, { forceRefresh: true });
   }
 
   private extractUserId(claims: Record<string, unknown>): string {
@@ -390,6 +376,7 @@ export class AuthService {
     claims: Record<string, unknown>,
     accessToken: string,
     userId: string,
+    userInfo?: Record<string, unknown> | null,
   ): Promise<string> {
     const directOrgId = this.tryExtractOrgId(claims);
     if (directOrgId) {
@@ -426,27 +413,25 @@ export class AuthService {
       return accessOrgId;
     }
 
-    const oidc = this.oidc.getModule();
-    const config = await this.oidc.getConfig();
-
     try {
-      const userInfo = (await oidc.fetchUserInfo(
-        config,
-        accessToken,
-        userId,
-      )) as Record<string, unknown>;
-      this.logger.log({
-        event: 'oidc.home_org.claims.userinfo',
-        claimKeys: this.getOrgClaimKeysPresent(userInfo),
-      });
-      const userInfoOrgId = this.tryExtractOrgId(userInfo);
-      if (userInfoOrgId) {
+      const userInfoClaims =
+        typeof userInfo === 'undefined'
+          ? await this.loadUserInfoClaims(accessToken, userId)
+          : userInfo;
+      if (userInfoClaims) {
         this.logger.log({
-          event: 'oidc.home_org.resolved',
-          source: 'userinfo',
-          orgId: userInfoOrgId,
+          event: 'oidc.home_org.claims.userinfo',
+          claimKeys: this.getOrgClaimKeysPresent(userInfoClaims),
         });
-        return userInfoOrgId;
+        const userInfoOrgId = this.tryExtractOrgId(userInfoClaims);
+        if (userInfoOrgId) {
+          this.logger.log({
+            event: 'oidc.home_org.resolved',
+            source: 'userinfo',
+            orgId: userInfoOrgId,
+          });
+          return userInfoOrgId;
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
@@ -456,6 +441,25 @@ export class AuthService {
     }
 
     throw new UnauthorizedException('Missing org id');
+  }
+
+  private async loadUserInfoClaims(
+    accessToken: string,
+    userId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const oidc = this.oidc.getModule();
+    const config = await this.oidc.getConfig();
+
+    try {
+      return (await oidc.fetchUserInfo(config, accessToken, userId)) as Record<
+        string,
+        unknown
+      >;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(`Userinfo request failed: ${message}`);
+      return null;
+    }
   }
 
   private tryExtractOrgId(claims: Record<string, unknown>): string | null {
@@ -512,32 +516,293 @@ export class AuthService {
     return Array.from(roles);
   }
 
-  private async resolveRolesForSubject(
-    userId: string,
+  private async resolveAuthorizedOrgAccesses(params: {
+    claims: Record<string, unknown>;
+    accessToken: string;
+    userId: string;
+    homeOrgId: string;
+    userInfo?: Record<string, unknown> | null;
+  }): Promise<AuthorizedOrgAccess[]> {
+    const authApiAccesses = await this.loadAuthorizedOrgAccessesFromAuthApi(
+      params.accessToken,
+      params.homeOrgId,
+    );
+    if (authApiAccesses !== null) {
+      if (authApiAccesses.length > 0) {
+        return authApiAccesses;
+      }
+      throw new UnauthorizedException('No authorized org access found');
+    }
+
+    const byOrg = new Map<
+      string,
+      { primaryDomain: string | null; roleKeys: Set<string> }
+    >();
+
+    this.collectAuthorizedOrgAccessesFromClaims(params.claims, byOrg);
+
+    const accessClaims = this.decodeJwtPayload(params.accessToken);
+    if (accessClaims) {
+      this.collectAuthorizedOrgAccessesFromClaims(accessClaims, byOrg);
+    }
+
+    if (params.userInfo) {
+      this.collectAuthorizedOrgAccessesFromClaims(params.userInfo, byOrg);
+    }
+
+    const accesses: AuthorizedOrgAccess[] = [];
+    for (const [orgId, value] of byOrg.entries()) {
+      const role = this.mapRoleKeysToUserRole(Array.from(value.roleKeys));
+      if (!role) {
+        continue;
+      }
+
+      const source =
+        orgId === params.homeOrgId
+          ? UserOrgAccessSource.DIRECT
+          : UserOrgAccessSource.EXTERNAL;
+
+      if (source === UserOrgAccessSource.EXTERNAL && role === UserRole.ROOT) {
+        this.logger.warn(
+          `Ignoring invalid external root access from ZITADEL for user "${params.userId}" org "${orgId}"`,
+        );
+        continue;
+      }
+
+      accesses.push({
+        orgId,
+        primaryDomain: value.primaryDomain,
+        role,
+        source,
+      });
+    }
+
+    if (accesses.length > 0) {
+      return accesses;
+    }
+
+    const fallbackRoles = this.extractRoles(params.claims, params.accessToken);
+    if (
+      fallbackRoles.length === 0 &&
+      params.userInfo &&
+      Object.keys(params.userInfo).length > 0
+    ) {
+      fallbackRoles.push(...this.extractRoles(params.userInfo));
+    }
+
+    return [
+      {
+        orgId: params.homeOrgId,
+        primaryDomain: null,
+        role: this.mapRolesToUserRole(fallbackRoles),
+        source: UserOrgAccessSource.DIRECT,
+      },
+    ];
+  }
+
+  private async loadAuthorizedOrgAccessesFromAuthApi(
     accessToken: string,
-    claims?: Record<string, unknown>,
-  ): Promise<string[]> {
-    const directClaims = claims ?? this.decodeJwtPayload(accessToken) ?? {};
-    const directRoles = this.extractRoles(directClaims, accessToken);
-    if (directRoles.length > 0) {
-      return directRoles;
+    homeOrgId: string,
+  ): Promise<AuthorizedOrgAccess[] | null> {
+    const issuer = this.config.get<string>('ZITADEL_ISSUER');
+    if (!issuer) {
+      return null;
     }
 
-    const oidc = this.oidc.getModule();
-    const config = await this.oidc.getConfig();
-
-    try {
-      const userInfo = (await oidc.fetchUserInfo(
-        config,
-        accessToken,
-        userId,
-      )) as Record<string, unknown>;
-      return this.extractRoles(userInfo);
-    } catch (error) {
+    const endpoint = new URL('/auth/v1/usergrants/me/_search', issuer);
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        query: {
+          offset: '0',
+          limit: 100,
+          asc: true,
+        },
+      }),
+    }).catch((error) => {
       const message = error instanceof Error ? error.message : 'unknown error';
-      this.logger.warn(`Userinfo request failed: ${message}`);
-      return [];
+      this.logger.warn(`Auth API user grant lookup failed: ${message}`);
+      return null;
+    });
+
+    if (!response) {
+      return null;
     }
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '');
+      this.logger.warn(
+        `Auth API user grant lookup failed with status ${response.status}${responseText ? `: ${responseText}` : ''}`,
+      );
+      return null;
+    }
+
+    const payload = (await response.json().catch(() => null)) as {
+      result?: Array<{
+        orgId?: string;
+        orgDomain?: string;
+        roleKeys?: string[];
+        roles?: string[];
+      }>;
+    } | null;
+
+    const results = Array.isArray(payload?.result) ? payload.result : [];
+    const accesses: AuthorizedOrgAccess[] = [];
+
+    for (const result of results) {
+      const orgId = result.orgId?.trim();
+      if (!orgId) {
+        continue;
+      }
+
+      const roleKeys = Array.isArray(result.roleKeys)
+        ? result.roleKeys.filter(
+            (roleKey): roleKey is string =>
+              typeof roleKey === 'string' && roleKey.length > 0,
+          )
+        : Array.isArray(result.roles)
+          ? result.roles.filter(
+              (roleKey): roleKey is string =>
+                typeof roleKey === 'string' && roleKey.length > 0,
+            )
+          : [];
+
+      const role = this.mapRoleKeysToUserRole(roleKeys);
+      if (!role) {
+        continue;
+      }
+
+      const source =
+        orgId === homeOrgId
+          ? UserOrgAccessSource.DIRECT
+          : UserOrgAccessSource.EXTERNAL;
+      if (source === UserOrgAccessSource.EXTERNAL && role === UserRole.ROOT) {
+        this.logger.warn(
+          `Ignoring invalid external root access from Auth API for org "${orgId}"`,
+        );
+        continue;
+      }
+
+      accesses.push({
+        orgId,
+        primaryDomain: result.orgDomain?.trim().toLowerCase() ?? null,
+        role,
+        source,
+      });
+    }
+
+    return accesses;
+  }
+
+  private collectAuthorizedOrgAccessesFromClaims(
+    claims: Record<string, unknown>,
+    byOrg: Map<string, { primaryDomain: string | null; roleKeys: Set<string> }>,
+  ): void {
+    for (const claimKey of this.getRoleClaimKeys()) {
+      const claimValue = claims[claimKey];
+      if (!claimValue || typeof claimValue !== 'object') {
+        continue;
+      }
+
+      const containers = Array.isArray(claimValue) ? claimValue : [claimValue];
+      for (const container of containers) {
+        if (!container || typeof container !== 'object') {
+          continue;
+        }
+
+        for (const [roleKey, organizations] of Object.entries(
+          container as Record<string, unknown>,
+        )) {
+          if (!organizations || typeof organizations !== 'object') {
+            continue;
+          }
+
+          if (Array.isArray(organizations)) {
+            for (const organization of organizations) {
+              if (
+                organization &&
+                typeof organization === 'object' &&
+                'id' in organization
+              ) {
+                const orgRecord = organization as Record<string, unknown>;
+                this.addAuthorizedOrgRole(
+                  byOrg,
+                  String(orgRecord.id),
+                  roleKey,
+                  this.extractPrimaryDomainValue(orgRecord),
+                );
+              }
+            }
+            continue;
+          }
+
+          for (const [orgId, meta] of Object.entries(
+            organizations as Record<string, unknown>,
+          )) {
+            this.addAuthorizedOrgRole(
+              byOrg,
+              orgId,
+              roleKey,
+              this.extractPrimaryDomainValue(meta),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  private addAuthorizedOrgRole(
+    byOrg: Map<string, { primaryDomain: string | null; roleKeys: Set<string> }>,
+    orgId: string,
+    roleKey: string,
+    primaryDomain: string | null,
+  ): void {
+    if (!orgId || !roleKey) {
+      return;
+    }
+
+    const existing = byOrg.get(orgId) ?? {
+      primaryDomain: null,
+      roleKeys: new Set<string>(),
+    };
+    if (!existing.primaryDomain && primaryDomain) {
+      existing.primaryDomain = primaryDomain;
+    }
+    existing.roleKeys.add(roleKey);
+    byOrg.set(orgId, existing);
+  }
+
+  private extractPrimaryDomainValue(value: unknown): string | null {
+    if (typeof value === 'string' && value.length > 0) {
+      return value.toLowerCase();
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+
+    const record = value as Record<string, unknown>;
+    const candidates = ['primaryDomain', 'primary_domain', 'domain', 'name'];
+
+    for (const candidate of candidates) {
+      const candidateValue = record[candidate];
+      if (typeof candidateValue === 'string' && candidateValue.length > 0) {
+        return candidateValue.toLowerCase();
+      }
+    }
+
+    return null;
+  }
+
+  private mapRoleKeysToUserRole(roleKeys: string[]): UserRole | null {
+    if (roleKeys.length === 0) {
+      return null;
+    }
+
+    return this.mapRolesToUserRole(roleKeys);
   }
 
   private collectRolesFromClaims(
@@ -708,16 +973,14 @@ export class AuthService {
 
   private async resolveUserFromOidc(params: {
     userId: string;
-    orgId: string;
+    homeOrgId: string;
     email: string | null;
-    roles: string[];
+    role: UserRole;
   }): Promise<User> {
-    const role = this.mapRolesToUserRole(params.roles);
-
     return this.prisma.$transaction(async (tx) => {
       await tx.org.upsert({
-        where: { id: params.orgId },
-        create: { id: params.orgId },
+        where: { id: params.homeOrgId },
+        create: { id: params.homeOrgId },
         update: {},
       });
 
@@ -728,52 +991,78 @@ export class AuthService {
       if (existing?.status === UserStatus.DISABLED) {
         throw new UnauthorizedException('User is disabled');
       }
-      if (existing && existing.homeOrgId !== params.orgId) {
+      if (existing && existing.homeOrgId !== params.homeOrgId) {
         throw new UnauthorizedException('User org mismatch');
       }
 
-      const user = existing
+      return existing
         ? await tx.user.update({
             where: { id: params.userId },
             data: {
               email: params.email ?? existing.email,
-              role,
+              role: params.role,
               status: UserStatus.ACTIVE,
             },
           })
         : await tx.user.create({
             data: {
               id: params.userId,
-              homeOrgId: params.orgId,
+              homeOrgId: params.homeOrgId,
               email: params.email,
-              role,
+              role: params.role,
               status: UserStatus.ACTIVE,
             },
           });
+    });
+  }
 
-      await tx.userOrgAccess.upsert({
-        where: {
-          userId_orgId: {
-            userId: params.userId,
-            orgId: params.orgId,
-          },
-        },
-        create: {
-          userId: params.userId,
-          orgId: params.orgId,
-          role,
-          source: UserOrgAccessSource.DIRECT,
-          status: UserOrgAccessStatus.ACTIVE,
-        },
-        update: {
-          role,
-          source: UserOrgAccessSource.DIRECT,
-          status: UserOrgAccessStatus.ACTIVE,
+  private async syncSessionAuthorization(
+    sessionId: string,
+    options: { forceRefresh?: boolean } = {},
+  ): Promise<SessionContext> {
+    this.assertOidcEnabled();
+    this.assertCryptoEnabled();
+
+    const session = await this.loadSessionWithTokens(sessionId);
+    if (session.user.status === UserStatus.DISABLED) {
+      throw new UnauthorizedException('User is disabled');
+    }
+
+    const { accessToken, accessExpiresAt } = await this.getCurrentAccessToken(
+      session,
+      options,
+    );
+    const userInfo = await this.loadUserInfoClaims(accessToken, session.userId);
+    const authorizedAccesses = await this.resolveAuthorizedOrgAccesses({
+      claims: this.decodeJwtPayload(accessToken) ?? {},
+      accessToken,
+      userId: session.userId,
+      homeOrgId: session.homeOrgId,
+      userInfo,
+    });
+    const homeAccess =
+      authorizedAccesses.find(
+        (access) =>
+          access.orgId === session.homeOrgId &&
+          access.source === UserOrgAccessSource.DIRECT,
+      ) ?? null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: session.userId },
+        data: {
+          role: homeAccess?.role ?? UserRole.USER,
+          status: UserStatus.ACTIVE,
         },
       });
 
-      return user;
+      await this.syncAuthorizedOrgAccessProjectionTx(tx, session.userId, {
+        homeOrgId: session.homeOrgId,
+        accesses: authorizedAccesses,
+      });
     });
+
+    return this.buildSessionContext(session, accessExpiresAt);
   }
 
   private mapRolesToUserRole(roles: string[]): UserRole {
@@ -907,6 +1196,8 @@ export class AuthService {
       this.config.get<string>('ZITADEL_MASTER_PROJECT_ID') ?? '';
     const orgDomain = options?.orgDomain;
     const resourceOwnerScope = 'urn:zitadel:iam:user:resourceowner';
+    const zitadelApiAudienceScope =
+      'urn:zitadel:iam:org:project:id:zitadel:aud';
 
     const roleScope = `urn:zitadel:iam:org:project:${projectId}:roles`;
     const scopes = new Set(base.split(' ').filter(Boolean));
@@ -914,40 +1205,27 @@ export class AuthService {
       scopes.add(roleScope);
     }
     scopes.add(resourceOwnerScope);
+    scopes.add(zitadelApiAudienceScope);
     if (orgDomain) {
       scopes.add(`urn:zitadel:iam:org:domain:primary:${orgDomain}`);
     }
     return Array.from(scopes).join(' ');
   }
 
-  private async resolveActiveOrgAccess(params: {
-    userId: string;
+  private resolveActiveOrgAccess(params: {
+    accesses: AuthorizedOrgAccess[];
     homeOrgId: string;
     requestedOrgId?: string;
     requestedOrgDomain?: string;
   }) {
-    const accesses = await this.prisma.userOrgAccess.findMany({
-      where: {
-        userId: params.userId,
-        status: UserOrgAccessStatus.ACTIVE,
-      },
-      include: { org: true },
-      orderBy: [{ source: 'asc' }, { createdAt: 'asc' }],
-    });
-
-    if (accesses.length === 0) {
+    if (params.accesses.length === 0) {
       throw new UnauthorizedException('No active org access found');
     }
 
     const requestedById = params.requestedOrgId
-      ? accesses.find((access) => access.orgId === params.requestedOrgId)
+      ? params.accesses.find((access) => access.orgId === params.requestedOrgId)
       : null;
     if (params.requestedOrgId) {
-      if (params.requestedOrgId !== params.homeOrgId) {
-        throw new ForbiddenException(
-          'Cross-org login is disabled until ZITADEL-backed authorization is implemented',
-        );
-      }
       if (!requestedById) {
         throw new ForbiddenException('No access to requested org');
       }
@@ -956,14 +1234,21 @@ export class AuthService {
     }
 
     if (params.requestedOrgDomain) {
-      throw new ForbiddenException(
-        'Cross-org login via orgDomain is disabled until ZITADEL-backed authorization is implemented',
+      const requestedByDomain = params.accesses.find(
+        (access) =>
+          access.primaryDomain?.toLowerCase() ===
+          params.requestedOrgDomain?.toLowerCase(),
       );
+      if (!requestedByDomain) {
+        throw new ForbiddenException('No access to requested org');
+      }
+      this.assertAccessRoleAllowed(requestedByDomain);
+      return requestedByDomain;
     }
 
     const homeAccess =
-      accesses.find((access) => access.orgId === params.homeOrgId) ??
-      (accesses.length === 1 ? accesses[0] : null);
+      params.accesses.find((access) => access.orgId === params.homeOrgId) ??
+      (params.accesses.length === 1 ? params.accesses[0] : null);
 
     if (!homeAccess) {
       throw new BadRequestException(
@@ -973,6 +1258,94 @@ export class AuthService {
 
     this.assertAccessRoleAllowed(homeAccess);
     return homeAccess;
+  }
+
+  private requireAuthorizedOrgAccess(
+    accesses: AuthorizedOrgAccess[],
+    orgId: string,
+  ): AuthorizedOrgAccess {
+    const access = accesses.find((candidate) => candidate.orgId === orgId);
+    if (!access) {
+      throw new ForbiddenException('No access to requested org');
+    }
+    this.assertAccessRoleAllowed(access);
+    return access;
+  }
+
+  private async syncAuthorizedOrgAccessProjection(
+    userId: string,
+    params: { homeOrgId: string; accesses: AuthorizedOrgAccess[] },
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await this.syncAuthorizedOrgAccessProjectionTx(tx, userId, params);
+    });
+  }
+
+  private async syncAuthorizedOrgAccessProjectionTx(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    params: { homeOrgId: string; accesses: AuthorizedOrgAccess[] },
+  ): Promise<void> {
+    for (const access of params.accesses) {
+      await tx.org.upsert({
+        where: { id: access.orgId },
+        create: { id: access.orgId, name: access.primaryDomain ?? undefined },
+        update: {},
+      });
+
+      await tx.userOrgAccess.upsert({
+        where: {
+          userId_orgId: {
+            userId,
+            orgId: access.orgId,
+          },
+        },
+        create: {
+          userId,
+          orgId: access.orgId,
+          role: access.role,
+          source: access.source,
+          status: UserOrgAccessStatus.ACTIVE,
+        },
+        update: {
+          role: access.role,
+          source: access.source,
+          status: UserOrgAccessStatus.ACTIVE,
+        },
+      });
+    }
+
+    const externalOrgIds = params.accesses
+      .filter((access) => access.source === UserOrgAccessSource.EXTERNAL)
+      .map((access) => access.orgId);
+
+    await tx.userOrgAccess.updateMany({
+      where: {
+        userId,
+        source: UserOrgAccessSource.EXTERNAL,
+        ...(externalOrgIds.length > 0
+          ? { orgId: { notIn: externalOrgIds } }
+          : {}),
+      },
+      data: { status: UserOrgAccessStatus.REVOKED },
+    });
+
+    const hasHomeDirectAccess = params.accesses.some(
+      (access) =>
+        access.orgId === params.homeOrgId &&
+        access.source === UserOrgAccessSource.DIRECT,
+    );
+
+    if (!hasHomeDirectAccess) {
+      await tx.userOrgAccess.updateMany({
+        where: {
+          userId,
+          orgId: params.homeOrgId,
+          source: UserOrgAccessSource.DIRECT,
+        },
+        data: { status: UserOrgAccessStatus.REVOKED },
+      });
+    }
   }
 
   private async loadActiveOrgAccess(userId: string, orgId: string) {

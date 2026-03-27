@@ -36,7 +36,14 @@ export class SessionGuard implements CanActivate {
       throw new UnauthorizedException('Invalid session');
     }
 
-    if (session.accessExpired) {
+    const isCrossOrgSession =
+      !!session.activeOrgId &&
+      !!session.homeOrgId &&
+      session.activeOrgId !== session.homeOrgId;
+
+    if (isCrossOrgSession) {
+      session = await this.auth.validateSessionAuthorization(session.id);
+    } else if (session.accessExpired) {
       session = await this.auth.refreshSession(session.id);
     }
 
