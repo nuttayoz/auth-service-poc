@@ -13,10 +13,6 @@ import {
   ProvisioningJob,
   ProvisioningJobStatus,
   ProvisioningJobType,
-  User,
-  UserOrgAccess,
-  UserOrgAccessSource,
-  UserOrgAccessStatus,
   UserRole,
 } from '@prisma/client';
 import { Queue } from 'bullmq';
@@ -40,28 +36,6 @@ export type CreateUserPayload = {
 };
 
 export type RootCreateUserPayload = CreateUserPayload;
-
-export type GrantExternalAccessPayload = {
-  userId?: string;
-  email?: string;
-  projectGrantId?: string;
-  zitadelRoleAssignmentId?: string;
-};
-
-export type ExternalAccessResponse = {
-  id: string;
-  userId: string;
-  email: string | null;
-  homeOrgId: string;
-  orgId: string;
-  role: UserRole;
-  source: UserOrgAccessSource;
-  status: UserOrgAccessStatus;
-  projectGrantId: string | null;
-  zitadelRoleAssignmentId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
 
 export type ProvisioningJobResponse = {
   id: string;
@@ -167,32 +141,6 @@ export class AdminService {
     }
 
     return this.toProvisioningJobResponse(job);
-  }
-
-  listExternalAccesses(
-    _session: SessionContext,
-  ): Promise<ExternalAccessResponse[]> {
-    throw new ServiceUnavailableException(
-      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented`,
-    );
-  }
-
-  grantExternalAccess(
-    session: SessionContext,
-    payload: GrantExternalAccessPayload,
-  ): Promise<ExternalAccessResponse> {
-    throw new ServiceUnavailableException(
-      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)} ${JSON.stringify(payload)}`,
-    );
-  }
-
-  revokeExternalAccess(
-    session: SessionContext,
-    payload: GrantExternalAccessPayload,
-  ): Promise<ExternalAccessResponse> {
-    throw new ServiceUnavailableException(
-      `Cross-org access management is disabled until ZITADEL-backed authorization is implemented ${JSON.stringify(session)} ${JSON.stringify(payload)}`,
-    );
   }
 
   private async enqueueUserProvisioning(params: {
@@ -346,49 +294,6 @@ export class AdminService {
       updatedAt: job.updatedAt,
       startedAt: job.startedAt ?? null,
       completedAt: job.completedAt ?? null,
-    };
-  }
-
-  private async resolveUserForExternalAccess(
-    payload: GrantExternalAccessPayload,
-  ): Promise<User> {
-    const userId = payload.userId?.trim();
-    const email = payload.email?.trim().toLowerCase();
-
-    if ((userId ? 1 : 0) + (email ? 1 : 0) !== 1) {
-      throw new BadRequestException('Provide exactly one of userId or email');
-    }
-
-    const user = await this.prisma.user.findFirst({
-      where: userId ? { id: userId } : { email },
-    });
-
-    if (!user) {
-      throw new NotFoundException(
-        'User not found locally. The user must exist in auth-service before external access can be synced.',
-      );
-    }
-
-    return user;
-  }
-
-  private toExternalAccessResponse(
-    access: UserOrgAccess,
-    user: User,
-  ): ExternalAccessResponse {
-    return {
-      id: access.id,
-      userId: access.userId,
-      email: user.email ?? null,
-      homeOrgId: user.homeOrgId,
-      orgId: access.orgId,
-      role: access.role,
-      source: access.source,
-      status: access.status,
-      projectGrantId: access.projectGrantId ?? null,
-      zitadelRoleAssignmentId: access.zitadelRoleAssignmentId ?? null,
-      createdAt: access.createdAt,
-      updatedAt: access.updatedAt,
     };
   }
 
