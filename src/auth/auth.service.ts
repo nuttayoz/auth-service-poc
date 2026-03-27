@@ -212,6 +212,8 @@ export class AuthService {
         userId: user.id,
         homeOrgId: user.homeOrgId,
         activeOrgId: activeAccess.orgId,
+        expiresAt: this.resolveSessionAbsoluteExpiry(),
+        lastActivityAt: new Date(),
         accessExpiresAt,
         refreshExpiresAt: null,
         tokens: {
@@ -1095,6 +1097,13 @@ export class AuthService {
     }
 
     return new Date(Date.now() + 3600 * 1000);
+  }
+
+  private resolveSessionAbsoluteExpiry(): Date {
+    const absoluteMaxAgeSec =
+      this.config.get<number>('SESSION_ABSOLUTE_MAX_AGE_SEC') ??
+      60 * 60 * 24 * 30;
+    return new Date(Date.now() + absoluteMaxAgeSec * 1000);
   }
 
   private async buildSessionContext(

@@ -86,6 +86,8 @@ model Session {
   userId           String
   homeOrgId        String
   activeOrgId      String?       @map("orgId")
+  expiresAt        DateTime
+  lastActivityAt   DateTime      @default(now())
   accessExpiresAt  DateTime
   refreshExpiresAt DateTime?
   createdAt        DateTime      @default(now())
@@ -96,6 +98,8 @@ model Session {
   @@index([userId])
   @@index([homeOrgId])
   @@index([activeOrgId], map: "Session_orgId_idx")
+  @@index([expiresAt])
+  @@index([lastActivityAt])
 }
 
 model UserOrgAccess {
@@ -203,14 +207,14 @@ model ProvisioningJob {
 }
 
 model OidcRequest {
-  id           String   @id @default(uuid())
-  state        String   @unique
-  codeVerifier String
-  nonce        String
-  requestedOrgId String?
+  id                 String   @id @default(uuid())
+  state              String   @unique
+  codeVerifier       String
+  nonce              String
+  requestedOrgId     String?
   requestedOrgDomain String?
-  redirectUri  String?
-  createdAt    DateTime @default(now())
+  redirectUri        String?
+  createdAt          DateTime @default(now())
 
   @@index([createdAt])
 }
