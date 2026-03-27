@@ -23,6 +23,7 @@ import type { SessionContext } from './session.service.js';
 
 const OIDC_REQUEST_TTL_MS = 10 * 60 * 1000;
 const REFRESH_SKEW_MS = 2 * 60 * 1000;
+const SESSION_ACTIVITY_TOUCH_INTERVAL_MS = 60 * 1000;
 const DEFAULT_SCOPES = 'openid profile email offline_access';
 
 type SessionWithTokens = Prisma.SessionGetPayload<{
@@ -298,6 +299,7 @@ export class AuthService {
     );
 
     if (session.activeOrgId === targetOrgId) {
+      await this.touchSessionActivity(session.id, sessionRecord.lastActivityAt);
       return {
         ...session,
         accessExpiresAt,
@@ -311,7 +313,7 @@ export class AuthService {
 
     await this.prisma.session.update({
       where: { id: session.id },
-      data: { activeOrgId: targetOrgId },
+      data: { activeOrgId: targetOrgId, lastActivityAt: new Date() },
     });
 
     await this.writeAuditLogSafe(
@@ -876,6 +878,12 @@ export class AuthService {
     if (!session || !session.tokens || !session.user) {
       throw new UnauthorizedException('Session not found');
     }
+    if (session.user.status !== UserStatus.ACTIVE) {
+      await this.invalidateSession(session.id);
+      throw new UnauthorizedException('User is disabled');
+    }
+
+    await this.assertSessionIsActive(session);
 
     return session as SessionWithTokens;
   }
@@ -898,16 +906,26 @@ export class AuthService {
 
     const refreshToken = this.decryptSessionRefreshToken(session);
     if (!refreshToken) {
-      throw new UnauthorizedException('Missing refresh token');
+      await this.invalidateSession(session.id);
+      throw new UnauthorizedException('Session can no longer be refreshed');
     }
 
     const oidc = this.oidc.getModule();
     const config = await this.oidc.getConfig();
-    const tokenSet = await oidc.refreshTokenGrant(config, refreshToken);
+    const tokenSet = await oidc
+      .refreshTokenGrant(config, refreshToken)
+      .catch(async (error) => {
+        await this.invalidateSession(session.id);
+        const message =
+          error instanceof Error ? error.message : 'unknown error';
+        this.logger.warn(`Session refresh failed: ${message}`);
+        throw new UnauthorizedException('Session refresh failed');
+      });
 
     const accessToken = tokenSet?.access_token ?? '';
     if (!accessToken) {
-      throw new UnauthorizedException('Missing access token');
+      await this.invalidateSession(session.id);
+      throw new UnauthorizedException('Session refresh failed');
     }
 
     const accessExpiresAt = this.resolveAccessExpiry(tokenSet);
@@ -1026,10 +1044,6 @@ export class AuthService {
     this.assertCryptoEnabled();
 
     const session = await this.loadSessionWithTokens(sessionId);
-    if (session.user.status === UserStatus.DISABLED) {
-      throw new UnauthorizedException('User is disabled');
-    }
-
     const { accessToken, accessExpiresAt } = await this.getCurrentAccessToken(
       session,
       options,
@@ -1048,6 +1062,7 @@ export class AuthService {
           access.orgId === session.homeOrgId &&
           access.source === UserOrgAccessSource.DIRECT,
       ) ?? null;
+    const now = new Date();
 
     await this.prisma.$transaction(async (tx) => {
       await tx.user.update({
@@ -1062,9 +1077,27 @@ export class AuthService {
         homeOrgId: session.homeOrgId,
         accesses: authorizedAccesses,
       });
+
+      await tx.session.update({
+        where: { id: session.id },
+        data: { lastActivityAt: now },
+      });
     });
 
-    return this.buildSessionContext(session, accessExpiresAt);
+    try {
+      return await this.buildSessionContext(session, accessExpiresAt);
+    } catch (error) {
+      if (
+        error instanceof UnauthorizedException ||
+        error instanceof ForbiddenException
+      ) {
+        await this.invalidateSession(session.id);
+        throw new UnauthorizedException(
+          'Session no longer has active org access',
+        );
+      }
+      throw error;
+    }
   }
 
   private mapRolesToUserRole(roles: string[]): UserRole {
@@ -1106,6 +1139,59 @@ export class AuthService {
     return new Date(Date.now() + absoluteMaxAgeSec * 1000);
   }
 
+  private getSessionIdleTimeoutMs(): number {
+    return (
+      (this.config.get<number>('SESSION_IDLE_TIMEOUT_SEC') ??
+        60 * 60 * 24 * 7) * 1000
+    );
+  }
+
+  private async assertSessionIsActive(session: {
+    id: string;
+    expiresAt: Date;
+    lastActivityAt: Date;
+  }): Promise<void> {
+    const now = Date.now();
+    if (session.expiresAt.getTime() <= now) {
+      await this.invalidateSession(session.id);
+      throw new UnauthorizedException('Session expired');
+    }
+
+    if (
+      session.lastActivityAt.getTime() + this.getSessionIdleTimeoutMs() <=
+      now
+    ) {
+      await this.invalidateSession(session.id);
+      throw new UnauthorizedException('Session expired due to inactivity');
+    }
+  }
+
+  private async touchSessionActivity(
+    sessionId: string,
+    lastActivityAt: Date,
+  ): Promise<void> {
+    const now = new Date();
+    if (
+      now.getTime() - lastActivityAt.getTime() <
+      SESSION_ACTIVITY_TOUCH_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    await this.prisma.session
+      .update({
+        where: { id: sessionId },
+        data: { lastActivityAt: now },
+      })
+      .catch(() => undefined);
+  }
+
+  private async invalidateSession(sessionId: string): Promise<void> {
+    await this.prisma.session.delete({ where: { id: sessionId } }).catch(() => {
+      return undefined;
+    });
+  }
+
   private async buildSessionContext(
     session: Pick<
       SessionWithTokens,
@@ -1141,8 +1227,7 @@ export class AuthService {
     const secure = this.config.get<boolean>('SESSION_COOKIE_SECURE') ?? false;
     const sameSite = (this.config.get<string>('SESSION_COOKIE_SAMESITE') ??
       'lax') as 'lax' | 'strict' | 'none';
-    const maxAge =
-      (this.config.get<number>('SESSION_COOKIE_MAX_AGE_SEC') ?? 604800) * 1000;
+    const maxAge = this.resolveSessionCookieMaxAgeMs();
 
     res.cookie(name, sessionId, {
       httpOnly: true,
@@ -1162,6 +1247,15 @@ export class AuthService {
     const path = this.config.get<string>('SESSION_COOKIE_PATH') ?? '/';
 
     res.clearCookie(name, { domain, path });
+  }
+
+  private resolveSessionCookieMaxAgeMs(): number {
+    const cookieMaxAgeSec =
+      this.config.get<number>('SESSION_COOKIE_MAX_AGE_SEC') ?? 604800;
+    const idleTimeoutSec =
+      this.config.get<number>('SESSION_IDLE_TIMEOUT_SEC') ?? 604800;
+
+    return Math.min(cookieMaxAgeSec, idleTimeoutSec) * 1000;
   }
 
   private sanitizeRedirect(redirect?: string): string | null {

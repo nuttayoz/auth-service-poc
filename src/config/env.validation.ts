@@ -139,6 +139,13 @@ export const envValidationSchema = Joi.object({
       });
     }
 
+    if (value.SESSION_COOKIE_MAX_AGE_SEC > value.SESSION_IDLE_TIMEOUT_SEC) {
+      return helpers.message({
+        custom:
+          'SESSION_COOKIE_MAX_AGE_SEC must be less than or equal to SESSION_IDLE_TIMEOUT_SEC',
+      });
+    }
+
     return value;
   }, 'session cookie security rules')
   .unknown(true);
