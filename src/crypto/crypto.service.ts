@@ -105,10 +105,17 @@ export class CryptoService {
   }
 
   private canonicalizeHeaders(headers: Record<string, string>): string {
-    return Object.keys(headers)
-      .map((key) => key.toLowerCase())
+    const normalized = Object.entries(headers).reduce<Record<string, string>>(
+      (acc, [key, value]) => {
+        acc[key.toLowerCase()] = value;
+        return acc;
+      },
+      {},
+    );
+
+    return Object.keys(normalized)
       .sort()
-      .map((key) => `${key}:${headers[key] ?? ''}`)
+      .map((key) => `${key}:${normalized[key] ?? ''}`)
       .join('\n');
   }
 
