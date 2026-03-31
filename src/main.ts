@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
 import { AppLogger } from './logging/app-logger.service.js';
@@ -52,6 +53,40 @@ async function bootstrap() {
         next();
       },
     );
+  });
+
+  const document = SwaggerModule.createDocument(
+    app,
+    new DocumentBuilder()
+      .setTitle('Auth Service API')
+      .setDescription(
+        'OIDC login, session management, provisioning, root-key, and health endpoints for the auth-service.',
+      )
+      .setVersion('0.0.1')
+      .addSecurity('session-cookie', {
+        type: 'apiKey',
+        in: 'cookie',
+        name: 'auth_session',
+        description:
+          'Session cookie issued by /auth/callback and required for session-protected endpoints.',
+      })
+      .addSecurity('root-key', {
+        type: 'apiKey',
+        in: 'header',
+        name: 'x-root-key',
+        description:
+          'Org-scoped machine credential for /auth/root/* provisioning endpoints.',
+      })
+      .build(),
+  );
+
+  SwaggerModule.setup('docs', app, document, {
+    customSiteTitle: 'Auth Service Docs',
+    swaggerOptions: {
+      persistAuthorization: true,
+      tagsSorter: 'alpha',
+      operationsSorter: 'alpha',
+    },
   });
 
   const config = app.get(ConfigService);

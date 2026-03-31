@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request, Response as ExpressResponse } from 'express';
 import { CryptoService } from '../crypto/crypto.service.js';
 import { Session } from './session.decorator.js';
@@ -59,6 +60,7 @@ const SIGNED_HEADER_KEYS = [
 ];
 
 @Controller('gateway')
+@ApiExcludeController()
 export class GatewayController {
   private readonly logger = new Logger(GatewayController.name);
 
