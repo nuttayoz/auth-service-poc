@@ -20,18 +20,106 @@ enum SigningKeyStatus {
   REVOKED
 }
 
+enum UserRole {
+  ROOT
+  USER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+}
+
+enum UserOrgAccessSource {
+  DIRECT
+  EXTERNAL
+}
+
+enum UserOrgAccessStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum ProvisioningJobType {
+  USER_CREATE
+  ADMIN_SIGNUP
+}
+
+enum ProvisioningJobStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  RECONCILIATION_REQUIRED
+}
+
+model Org {
+  id              String          @id
+  name            String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  rootKeys        RootKey[]
+  users           User[]
+  userOrgAccesses UserOrgAccess[]
+}
+
+model User {
+  id              String          @id
+  homeOrgId       String          @map("orgId")
+  email           String?         @unique
+  role            UserRole
+  status          UserStatus      @default(PENDING)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  rootKeysCreated RootKey[]       @relation("RootKeysCreated")
+  sessions        Session[]
+  orgAccesses     UserOrgAccess[]
+
+  homeOrg Org @relation(fields: [homeOrgId], references: [id], onDelete: Cascade)
+
+  @@index([homeOrgId], map: "User_orgId_idx")
+}
+
 model Session {
   id               String        @id @default(uuid())
   userId           String
-  orgId            String?
+  homeOrgId        String
+  activeOrgId      String?       @map("orgId")
+  expiresAt        DateTime
+  lastActivityAt   DateTime      @default(now())
   accessExpiresAt  DateTime
   refreshExpiresAt DateTime?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   tokens           SessionToken?
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@index([orgId])
+  @@index([homeOrgId])
+  @@index([activeOrgId], map: "Session_orgId_idx")
+  @@index([expiresAt])
+  @@index([lastActivityAt])
+}
+
+model UserOrgAccess {
+  id                      String              @id @default(uuid())
+  userId                  String
+  orgId                   String
+  role                    UserRole
+  source                  UserOrgAccessSource @default(DIRECT)
+  projectGrantId          String?
+  zitadelRoleAssignmentId String?
+  status                  UserOrgAccessStatus @default(ACTIVE)
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Org  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId, status])
+  @@index([userId, status])
 }
 
 model SessionToken {
@@ -51,12 +139,21 @@ model SessionToken {
 }
 
 model RootKey {
-  id        String        @id @default(uuid())
-  keyHash   String        @unique
-  keyEnc    Bytes?
-  status    RootKeyStatus @default(ACTIVE)
-  createdAt DateTime      @default(now())
-  revokedAt DateTime?
+  id              String        @id @default(uuid())
+  orgId           String
+  createdByUserId String?
+  keyHash         String        @unique
+  keyEnc          Bytes?
+  status          RootKeyStatus @default(ACTIVE)
+  lastUsedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  revokedAt       DateTime?
+
+  org           Org   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  createdByUser User? @relation("RootKeysCreated", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, status])
+  @@index([createdByUserId])
 }
 
 model SigningKey {
@@ -77,4 +174,47 @@ model AuditLog {
 
   @@index([actorUserId])
   @@index([action])
+}
+
+model ProvisioningJob {
+  id                   String                @id
+  jobType              ProvisioningJobType   @default(USER_CREATE)
+  orgId                String?
+  requestedByUserId    String?
+  requestedByRootKeyId String?
+  orgName              String?
+  orgDomain            String?
+  email                String
+  firstName            String?
+  lastName             String?
+  userName             String
+  requestedRole        UserRole
+  status               ProvisioningJobStatus @default(QUEUED)
+  resultOrgId          String?
+  resultUserId         String?
+  errorMessage         String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  @@index([jobType, status])
+  @@index([orgId, status])
+  @@index([requestedByUserId])
+  @@index([requestedByRootKeyId])
+  @@index([email])
+  @@index([resultOrgId])
+}
+
+model OidcRequest {
+  id                 String   @id @default(uuid())
+  state              String   @unique
+  codeVerifier       String
+  nonce              String
+  requestedOrgId     String?
+  requestedOrgDomain String?
+  redirectUri        String?
+  createdAt          DateTime @default(now())
+
+  @@index([createdAt])
 }
